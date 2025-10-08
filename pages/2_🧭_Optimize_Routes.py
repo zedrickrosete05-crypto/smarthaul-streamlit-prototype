@@ -57,12 +57,53 @@ if "routes_df" in st.session_state:
     df = st.session_state["routes_df"]
     st.dataframe(df, use_container_width=True)
     try:
-        import pydeck as pdk
-        layer = pdk.Layer("ScatterplotLayer", df, get_position='[lon, lat]', get_radius=50)
-        view = pdk.ViewState(latitude=float(df.lat.mean()), longitude=float(df.lon.mean()), zoom=11)
-        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view))
-    except Exception:
-        st.info("Add `pydeck` to requirements.txt to render the map.")
+    import pydeck as pdk
+
+    # Work on a safe copy
+    df = st.session_state["routes_df"].copy()
+
+    # 1) Build an ordered path for each vehicle (list of {lon, lat})
+    # Assumes df rows are already in stop order for each vehicle_id
+    def path_from_group(g):
+        return [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
+
+    paths = (
+        df.groupby("vehicle_id", sort=False)
+          .apply(path_from_group)
+          .reset_index(name="path")
+    )
+
+    # 2) Path layer (draws the line)
+    path_layer = pdk.Layer(
+        "PathLayer",
+        data=paths,
+        get_path="path",
+        get_width=3,
+        width_min_pixels=2,
+        pickable=False,
+    )
+
+    # 3) Point layer (draws the stops)
+    point_layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df,
+        get_position='[lon, lat]',
+        get_radius=40,
+        pickable=True,
+    )
+
+    # 4) Initial view centered on your data
+    view = pdk.ViewState(
+        latitude=float(df.lat.mean()),
+        longitude=float(df.lon.mean()),
+        zoom=11,
+    )
+
+    # 5) Render both layers
+    st.pydeck_chart(pdk.Deck(layers=[path_layer, point_layer], initial_view_state=view))
+
+except Exception as e:
+    st.info(f"Map rendering needs pydeck. If installed, error was: {e}")
 
 import io
 if "routes_df" in st.session_state:
