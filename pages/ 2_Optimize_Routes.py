@@ -56,6 +56,8 @@ if st.button("Compute routes"):
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"]
     st.dataframe(df, use_container_width=True)
+    show_map = st.checkbox("Show map", value=True)
+if show_map:
     try:
     import pydeck as pdk
 
