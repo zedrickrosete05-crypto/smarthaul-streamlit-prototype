@@ -63,3 +63,13 @@ if "routes_df" in st.session_state:
         st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view))
     except Exception:
         st.info("Add `pydeck` to requirements.txt to render the map.")
+
+import io
+if "routes_df" in st.session_state:
+    df = st.session_state["routes_df"]
+    st.download_button(
+        "Download planned routes (CSV)",
+        data=df.to_csv(index=False).encode("utf-8"),
+        file_name="routes_plan.csv",
+        mime="text/csv",
+    )
