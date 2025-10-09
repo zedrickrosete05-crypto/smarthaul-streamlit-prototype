@@ -137,37 +137,61 @@ if "routes_df" in st.session_state:
         with c3: st.metric("Last ETA", last_eta)
         with c4: st.metric("Alerts", alerts)
 
-    # ---------- optional place names (reverse-geocode) ----------
-    use_places = st.checkbox(
-        "Show place names (reverse-geocode via OpenStreetMap)",
-        value=False,
-        help="Uses geopy + Nominatim (1 req/sec) and caches results. Safe to disable."
-    )
-    place_available = False
-    if use_places:
-        try:
-            # Import ONLY when user enables it
-            from geopy.geocoders import Nominatim
-            from geopy.extra.rate_limiter import RateLimiter
+# ---------- optional place names (reverse-geocode) ----------
+use_places = st.checkbox(
+    "Show place names (reverse-geocode via OpenStreetMap)",
+    value=False,
+    help="Uses OSM Nominatim and caches results. Works with geopy if installed, otherwise falls back to HTTP.",
+)
+place_available = False
+if use_places:
+    # Try geopy first; if not present, fall back to HTTP requests
+    try:
+        from geopy.geocoders import Nominatim
+        from geopy.extra.rate_limiter import RateLimiter
 
-            geolocator = Nominatim(user_agent="smarthaul-demo")
-            reverse = RateLimiter(geolocator.reverse, min_delay_seconds=1)
+        geolocator = Nominatim(user_agent="smarthaul-demo")
+        reverse = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
-            @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-            def reverse_geocode(lat: float, lon: float) -> str:
-                try:
-                    loc = reverse((lat, lon), language="en", zoom=15)
-                    if loc:
-                        parts = [p.strip() for p in str(loc.address).split(",")]
-                        return ", ".join(parts[:3])
-                except Exception:
-                    pass
+        @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+        def reverse_geocode(lat: float, lon: float) -> str:
+            try:
+                loc = reverse((lat, lon), language="en", zoom=15)
+                if loc:
+                    parts = [p.strip() for p in str(loc.address).split(",")]
+                    return ", ".join(parts[:3])
+            except Exception:
+                pass
+            return ""
+
+        with st.spinner("Resolving place names..."):
+            df["place"] = df.apply(lambda r: reverse_geocode(float(r["lat"]), float(r["lon"])), axis=1)
+        place_available = True
+
+    except Exception:
+        # ---- HTTP fallback (no geopy needed) ----
+        import requests
+
+        @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
+        def reverse_geocode_http(lat: float, lon: float) -> str:
+            try:
+                url = "https://nominatim.openstreetmap.org/reverse"
+                params = {"lat": lat, "lon": lon, "format": "json", "zoom": 15, "addressdetails": 1}
+                headers = {"User-Agent": "smarthaul-demo/1.0 (contact: example@example.com)"}
+                resp = requests.get(url, params=params, headers=headers, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                disp = data.get("display_name", "")
+                parts = [p.strip() for p in disp.split(",")]
+                return ", ".join(parts[:3])
+            except Exception:
                 return ""
-            with st.spinner("Resolving place names..."):
-                df["place"] = df.apply(lambda r: reverse_geocode(float(r["lat"]), float(r["lon"])), axis=1)
-            place_available = True
-        except Exception as e:
-            st.info(f"Place names unavailable: {e}")
+
+        with st.spinner("Resolving place names..."):
+            df["place"] = df.apply(lambda r: reverse_geocode_http(float(r["lat"]), float(r["lon"])), axis=1)
+        st.info("Using HTTP fallback for reverse geocoding (geopy not installed).")
+        place_available = True
+
 
     # ---------- map (connected path + labels; uses place names if available) ----------
     show_map = st.checkbox("Show map", value=True)
