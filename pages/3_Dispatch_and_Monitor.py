@@ -1,3 +1,8 @@
+from branding import setup_page, header
+setup_page("SmartHaul – Dispatch & Monitor")
+header("Dispatch & Monitor")
+
+
 # pages/3_Dispatch_and_Monitor.py
 import streamlit as st
 import pandas as pd
