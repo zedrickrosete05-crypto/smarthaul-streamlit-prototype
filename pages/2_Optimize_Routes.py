@@ -1,6 +1,13 @@
-from branding import setup_page, header
-setup_page("SmartHaul – Optimize Routes")
-header("Optimize Routes")
+# --- SmartHaul branding ---
+import streamlit as st
+from pathlib import Path
+LOGO = "smarthaul-logo.png"
+st.set_page_config(page_title="SmartHaul – Optimize Routes", page_icon=LOGO, layout="wide")
+if Path(LOGO).exists():
+    st.sidebar.image(LOGO, use_column_width=True)
+st.markdown("<h1 style='margin:0'>SmartHaul</h1><p>Optimize Routes</p><hr>", unsafe_allow_html=True)
+# --- end branding ---
+
 
 import streamlit as st
 import pandas as pd
