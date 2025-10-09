@@ -8,5 +8,3 @@ st.markdown("""
 3. **Dispatch & Monitor** – review alerts.  
 4. **KPIs & Reports** – check on-time %.  
 """)
-import os, streamlit as st
-st.write("Pages dir contents:", sorted(os.listdir("pages")))
