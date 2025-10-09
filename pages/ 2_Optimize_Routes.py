@@ -176,102 +176,138 @@ if "routes_df" in st.session_state:
         with c4:
             st.metric("Alerts", alerts)
 
-    # ---------- map (colored routes + labels + depot) ----------
+    # ---------- map (connected path + labels like delivery apps) ----------
     show_map = st.checkbox("Show map", value=True)
     if show_map:
         try:
             import pydeck as pdk
             import numpy as np
 
-            # stop index per vehicle for labels
-            df["stop_idx"] = df.groupby("vehicle_id").cumcount() + 1
+            # Work on a fresh copy and ensure order by stop
+            df_map = st.session_state["routes_df"].copy()
+            df_map["stop_idx"] = df_map.groupby("vehicle_id").cumcount() + 1
+            df_map = df_map.sort_values(["vehicle_id", "stop_idx"], kind="mergesort").reset_index(drop=True)
 
-            # color per vehicle (RGB)
-            palette = np.array(
-                [
-                    [0, 122, 255],
-                    [255, 45, 85],
-                    [88, 86, 214],
-                    [255, 149, 0],
-                    [52, 199, 89],
-                    [175, 82, 222],
-                    [255, 59, 48],
-                    [90, 200, 250],
-                ]
-            )
-            veh_ids = df["vehicle_id"].unique()
+            # Color per vehicle (RGB palette)
+            palette = np.array([
+                [  0,122,255], [255, 45, 85], [ 88, 86,214], [255,149,  0],
+                [ 52,199, 89], [175, 82,222], [255, 59, 48], [ 90,200,250]
+            ])
+            veh_ids = df_map["vehicle_id"].unique()
             color_map = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
-            df["color"] = df["vehicle_id"].map(color_map)
+            df_map["color"] = df_map["vehicle_id"].map(color_map)
 
-            # path per vehicle
-            def path_from_group(g: pd.DataFrame):
-                return [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
+            # Include depot as starting point (uses first stop per vehicle; swap with fixed coords if needed)
+            include_depot = st.checkbox("Include depot as starting point", value=True)
+            if include_depot and len(df_map):
+                depots = (
+                    df_map.groupby("vehicle_id", sort=False)
+                          .first()[["lon", "lat"]]
+                          .reset_index()
+                          .rename(columns={"lon": "d_lon", "lat": "d_lat"})
+                )
+                df_map = df_map.merge(depots, on="vehicle_id", how="left")
+            else:
+                df_map["d_lon"] = np.nan
+                df_map["d_lat"] = np.nan
 
-            paths = (
-                df.groupby("vehicle_id", sort=False)
-                .apply(path_from_group)
-                .reset_index(name="path")
-            )
-            paths["color"] = paths["vehicle_id"].map(color_map)
+            # Build a sorted path per vehicle (depot first if enabled)
+            paths_rows = []
+            for v, g in df_map.groupby("vehicle_id", sort=False):
+                g = g.sort_values("stop_idx")
+                pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
+                if include_depot and np.isfinite(g["d_lon"].iloc[0]) and np.isfinite(g["d_lat"].iloc[0]):
+                    pts = [{"lon": float(g["d_lon"].iloc[0]), "lat": float(g["d_lat"].iloc[0])}] + pts
+                paths_rows.append({"vehicle_id": v, "path": pts, "color": color_map[v]})
+            paths = pd.DataFrame(paths_rows)
 
             path_layer = pdk.Layer(
                 "PathLayer",
                 data=paths,
                 get_path="path",
-                get_width=3,
+                get_width=4,
                 get_color="color",
                 width_min_pixels=2,
                 pickable=False,
             )
+
             point_layer = pdk.Layer(
                 "ScatterplotLayer",
-                data=df,
-                get_position="[lon, lat]",
-                get_radius=55,
+                data=df_map,
+                get_position='[lon, lat]',
+                get_radius=60,
                 get_fill_color="color",
                 get_line_color=[255, 255, 255],
                 line_width_min_pixels=1,
                 pickable=True,
             )
+
+            # Text labels like V1-1, V1-2, ...
+            df_map["label"] = df_map.apply(lambda r: f"{r['vehicle_id']}-{int(r['stop_idx'])}", axis=1)
             text_layer = pdk.Layer(
                 "TextLayer",
-                data=df,
-                get_position="[lon, lat]",
-                get_text="stop_idx",
+                data=df_map,
+                get_position='[lon, lat]',
+                get_text="label",
                 get_size=12,
                 get_color=[230, 230, 230],
                 get_angle=0,
                 get_alignment_baseline="'center'",
             )
 
-            # depot (use mean as fallback)
-            if len(df):
-                depot_lon = float(df.iloc[0].Lon) if "Lon" in df else float(df.iloc[0].lon)
-                depot_lat = float(df.iloc[0].Lat) if "Lat" in df else float(df.iloc[0].lat)
-            else:
-                depot_lon = float(df.lon.mean())
-                depot_lat = float(df.lat.mean())
-            depot = pd.DataFrame([{"lon": depot_lon, "lat": depot_lat}])
-            depot_layer = pdk.Layer(
+            # Start & End markers (bigger dots + labels)
+            starts = df_map[df_map["stop_idx"] == 1]
+            ends = df_map.loc[df_map.groupby("vehicle_id")["stop_idx"].idxmax()]
+
+            start_layer = pdk.Layer(
                 "ScatterplotLayer",
-                data=depot,
-                get_position="[lon, lat]",
-                get_radius=100,
-                get_fill_color=[255, 255, 0],
+                data=starts,
+                get_position='[lon, lat]',
+                get_radius=90,
+                get_fill_color=[255, 255, 0],  # yellow
                 get_line_color=[0, 0, 0],
                 line_width_min_pixels=2,
             )
+            start_text = pdk.Layer(
+                "TextLayer",
+                data=starts.assign(lbl="START"),
+                get_position='[lon, lat]',
+                get_text="lbl",
+                get_size=14,
+                get_color=[255, 255, 0],
+                get_alignment_baseline="'top'",
+            )
+
+            end_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=ends,
+                get_position='[lon, lat]',
+                get_radius=90,
+                get_fill_color=[255, 59, 48],  # red
+                get_line_color=[0, 0, 0],
+                line_width_min_pixels=2,
+            )
+            end_text = pdk.Layer(
+                "TextLayer",
+                data=ends.assign(lbl="END"),
+                get_position='[lon, lat]',
+                get_text="lbl",
+                get_size=14,
+                get_color=[255, 59, 48],
+                get_alignment_baseline="'bottom'",
+            )
 
             view = pdk.ViewState(
-                latitude=float(df.lat.mean()),
-                longitude=float(df.lon.mean()),
+                latitude=float(df_map.lat.mean()),
+                longitude=float(df_map.lon.mean()),
                 zoom=11,
             )
+
             tooltip = {"text": "Vehicle {vehicle_id}\nStop {stop_idx}\nETA {eta}"}
 
             st.pydeck_chart(
                 pdk.Deck(
-                    layers=[path_layer, depot_layer, point_layer, text_layer],
+                    layers=[path_layer, point_layer, text_layer, start_layer, start_text, end_layer, end_text],
                     initial_view_state=view,
                     tooltip=tooltip,
                 )
