@@ -1,22 +1,18 @@
-import streamlit as st
+import streamlit as st, pandas as pd
 
-st.title("📊 KPIs & Reports")
+st.title("📊 KPIs and Reports")
+if "dispatch_df" not in st.session_state:
+    st.warning("Nothing to report yet.")
+    st.stop()
 
-if "routes_df" not in st.session_state:
-    st.warning("Optimize routes first."); st.stop()
+df = st.session_state["dispatch_df"].copy()
+on_time = (df["alert"]=="").mean() if len(df) else 0
+delivered = (df["status"]=="Delivered").mean() if len(df) else 0
 
-df = st.session_state["routes_df"].copy()
+c1,c2 = st.columns(2)
+c1.metric("On-time (planned)", f"{on_time*100:.1f}%")
+c2.metric("Delivered (actual)", f"{delivered*100:.1f}%")
 
-def to_min(s):
-    return None if s=="N/A" else int(s[:2])*60+int(s[3:])
-
-on_time = [(to_min(ea) is not None and to_min(ea) <= to_min(te)) for ea,te in zip(df.eta, df.tw_end)]
-on_time_pct = 100*sum(on_time)/len(on_time) if len(on_time) else 0
-
-c1,c2=st.columns(2)
-c1.metric("On-time delivery % (plan)", f"{on_time_pct:.1f}%")
-c2.metric("ETA MAE (needs actuals)", "—")
-
-st.divider()
-st.write("Planned routes")
-st.dataframe(df, use_container_width=True)
+st.download_button("Download dispatch log (CSV)",
+    data=df.to_csv(index=False).encode("utf-8"),
+    file_name="dispatch_log.csv", mime="text/csv")
