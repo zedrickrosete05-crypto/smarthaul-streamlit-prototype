@@ -99,55 +99,16 @@ if st.button("Compute routes"):
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"].copy()
 
-    st.subheader("Planned routes")
-    df["Stop #"] = df.groupby("vehicle_id").cumcount() + 1
-    df["Time window"] = df["tw_start"].astype(str) + " – " + df["tw_end"].astype(str)
-    df["Lat"] = pd.to_numeric(df["lat"], errors="coerce").round(4)
-    df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
-
-    display_df = df.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"})[
-        ["Vehicle", "Stop #", "Order", "ETA", "Time window", "Alert", "Lat", "Lon"]
-    ]
-
-    st.dataframe(
-        display_df,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Vehicle": st.column_config.TextColumn("Vehicle"),
-            "Stop #": st.column_config.NumberColumn("Stop #"),
-            "Order": st.column_config.TextColumn("Order ID"),
-            "ETA": st.column_config.TextColumn("ETA"),
-            "Time window": st.column_config.TextColumn("Time window"),
-            "Alert": st.column_config.TextColumn("Alert"),
-            "Lat": st.column_config.NumberColumn("Lat", format="%.4f"),
-            "Lon": st.column_config.NumberColumn("Lon", format="%.4f"),
-        },
-    )
-
-    st.divider()
-    st.subheader("Route summary")
-    for v, g in df.groupby("vehicle_id", sort=False):
-        stops = len(g)
-        first_eta = g["eta"].iloc[0]
-        last_eta = g["eta"].iloc[-1] if (g["eta"].iloc[-1] != "N/A") else "—"
-        alerts = int((g["alert"] != "").sum())
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        with c1: st.metric(f"{v}", f"{stops} stops")
-        with c2: st.metric("First ETA", first_eta)
-        with c3: st.metric("Last ETA", last_eta)
-        with c4: st.metric("Alerts", alerts)
-
-    # ---------- optional place names (reverse-geocode) with automatic fallback ----------
+    # Optional place names (reverse-geocode) with automatic fallback
     use_places = st.checkbox(
         "Show place names (reverse-geocode via OpenStreetMap)",
         value=False,
-        help="Uses OSM Nominatim and caches results. Works with geopy if installed, otherwise uses HTTP fallback.",
+        help="Uses geopy if installed, otherwise HTTP fallback to OSM Nominatim (cached).",
     )
     place_available = False
     if use_places:
-        # Try geopy first; if not present, fall back to HTTP requests
         try:
+            # Try geopy
             from geopy.geocoders import Nominatim
             from geopy.extra.rate_limiter import RateLimiter
 
@@ -170,19 +131,18 @@ if "routes_df" in st.session_state:
             place_available = True
 
         except Exception:
-            # ---- HTTP fallback (no geopy needed) ----
+            # HTTP fallback (no extra package)
             import requests
 
             @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
             def reverse_geocode_http(lat: float, lon: float) -> str:
                 try:
                     url = "https://nominatim.openstreetmap.org/reverse"
-                    params = {"lat": lat, "lon": lon, "format": "json", "zoom": 15, "addressdetails": 1}
+                    params = {"lat": lat, "lon": lon, "format": "json", "zoom": 17, "addressdetails": 1}
                     headers = {"User-Agent": "smarthaul-demo/1.0 (contact: example@example.com)"}
                     resp = requests.get(url, params=params, headers=headers, timeout=10)
                     resp.raise_for_status()
-                    data = resp.json()
-                    disp = data.get("display_name", "")
+                    disp = resp.json().get("display_name", "")
                     parts = [p.strip() for p in disp.split(",")]
                     return ", ".join(parts[:3])
                 except Exception:
@@ -193,7 +153,56 @@ if "routes_df" in st.session_state:
             st.info("Using HTTP fallback for reverse geocoding (geopy not installed).")
             place_available = True
 
-    # ---------- map (connected path + labels; uses place names if available) ----------
+    # --------- Friendly table (Place shown, coords optional) ----------
+    st.subheader("Planned routes")
+
+    df["Stop #"] = df.groupby("vehicle_id").cumcount() + 1
+    df["Time window"] = df["tw_start"].astype(str) + " – " + df["tw_end"].astype(str)
+    df["Lat"] = pd.to_numeric(df["lat"], errors="coerce").round(4)
+    df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
+
+    display_df = df.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"})
+
+    hide_coords = st.checkbox("Hide coordinates", value=True)
+
+    cols = ["Vehicle", "Stop #", "Order"]
+    if "place" in df.columns:
+        cols.append("Place")
+    cols += ["ETA", "Time window", "Alert"]
+    if not hide_coords:
+        cols += ["Lat", "Lon"]
+
+    st.dataframe(
+        display_df[cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Vehicle": st.column_config.TextColumn("Vehicle"),
+            "Stop #": st.column_config.NumberColumn("Stop #"),
+            "Order": st.column_config.TextColumn("Order ID"),
+            "Place": st.column_config.TextColumn("Place"),
+            "ETA": st.column_config.TextColumn("ETA"),
+            "Time window": st.column_config.TextColumn("Time window"),
+            "Alert": st.column_config.TextColumn("Alert"),
+            "Lat": st.column_config.NumberColumn("Lat", format="%.4f"),
+            "Lon": st.column_config.NumberColumn("Lon", format="%.4f"),
+        },
+    )
+
+    st.divider()
+    st.subheader("Route summary")
+    for v, g in df.groupby("vehicle_id", sort=False):
+        stops = len(g)
+        first_eta = g["eta"].iloc[0]
+        last_eta = g["eta"].iloc[-1] if (g["eta"].iloc[-1] != "N/A") else "—"
+        alerts = int((g["alert"] != "").sum())
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        with c1: st.metric(f"{v}", f"{stops} stops")
+        with c2: st.metric("First ETA", first_eta)
+        with c3: st.metric("Last ETA", last_eta)
+        with c4: st.metric("Alerts", alerts)
+
+    # ---------- map (connected path + labels using place names if available) ----------
     show_map = st.checkbox("Show map", value=True)
     if show_map:
         try:
@@ -258,13 +267,14 @@ if "routes_df" in st.session_state:
                 pickable=True,
             )
 
-            if place_available and "place" in df_map.columns:
+            # Labels: prefer place names; otherwise just stop number
+            if "place" in df_map.columns and df_map["place"].notna().any():
                 df_map["label"] = df_map.apply(
-                    lambda r: f"{r['vehicle_id']}-{int(r['stop_idx'])}: {r['place']}" if r.get("place") else f"{r['vehicle_id']}-{int(r['stop_idx'])}",
+                    lambda r: f"{int(r['stop_idx'])}. {r['place']}" if r.get("place") else f"{int(r['stop_idx'])}",
                     axis=1,
                 )
             else:
-                df_map["label"] = df_map.apply(lambda r: f"{r['vehicle_id']}-{int(r['stop_idx'])}", axis=1)
+                df_map["label"] = df_map.apply(lambda r: f"{int(r['stop_idx'])}", axis=1)
 
             text_layer = pdk.Layer(
                 "TextLayer",
@@ -324,7 +334,8 @@ if "routes_df" in st.session_state:
                 zoom=11,
             )
 
-            tooltip = {"text": "Vehicle {vehicle_id}\nStop {stop_idx}\nETA {eta}"}
+            # Tooltip shows the same label (with place if available) + ETA
+            tooltip = {"text": "{label}\nVehicle {vehicle_id}\nETA {eta}"}
 
             st.pydeck_chart(
                 pdk.Deck(
