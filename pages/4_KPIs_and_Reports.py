@@ -1,3 +1,8 @@
+from branding import setup_page, header
+setup_page("SmartHaul – KPIs & Reports")
+header("KPIs & Reports")
+
+
 # pages/4_KPIs_and_Reports.py
 import streamlit as st
 import pandas as pd
