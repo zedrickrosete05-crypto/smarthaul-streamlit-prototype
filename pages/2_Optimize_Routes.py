@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta, time as dtime
+from datetime import datetime, timedelta
 import math
 
 st.set_page_config(page_title="SmartHaul – Optimize Routes", page_icon="🧭")
@@ -19,33 +19,22 @@ def travel_min(a, b, c, d, speed: float = 25.0) -> float:
     return (haversine_km(a, b, c, d) / max(speed, 5)) * 60.0
 
 def t(s: str) -> datetime:
-    s = str(s)
-    for fmt in ("%H:%M", "%H:%M:%S"):
-        try:
-            return datetime.strptime(s, fmt)
-        except ValueError:
-            pass
-    return datetime.strptime("08:00", "%H:%M")
+    return datetime.strptime(str(s), "%H:%M")
 
 # ---------- greedy planner ----------
-def greedy(df: pd.DataFrame,
-           depot=(14.5995, 120.9842),
-           speed: float = 25.0,
-           max_stops: int = 10,
-           start_time_str: str = "08:00") -> pd.DataFrame:
-
+def greedy(df: pd.DataFrame, depot=(14.5995, 120.9842), speed: float = 25.0, max_stops: int = 10) -> pd.DataFrame:
     orders = df.copy().reset_index(drop=True)
     orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
     orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
     orders["service_min"] = pd.to_numeric(orders.get("service_min", 0), errors="coerce").fillna(0)
     orders["tw_start"] = orders["tw_start"].astype(str)
-    orders["tw_end"] = orders["tw_end"].astype(str)
+    orders["tw_end"]   = orders["tw_end"].astype(str)
     orders["done"] = False
 
     routes, vid = [], 1
     while not orders.done.all():
         lat, lon = depot
-        now = t(start_time_str)
+        now = t("08:00")
         route = []
 
         while True:
@@ -94,94 +83,23 @@ if "orders_df" not in st.session_state:
     st.warning("Upload orders first on the Upload page.")
     st.stop()
 
-orders_df = st.session_state["orders_df"]
-
-# Controls
-speed = st.slider("Average speed (km/h)", 15, 60, 30, 1)
-maxst = st.slider("Max stops per route", 5, 30, 10, 1)
-start_time = st.time_input("Start time", value=dtime(8, 0), help="Driver leaves depot at this time")
-
-depot_mode = st.radio(
-    "Depot location",
-    ["Use centroid of uploaded orders (recommended)", "Enter manually"],
-    index=0,
-    help="Make sure depot is near your orders so ETAs are feasible."
-)
-
-if depot_mode == "Use centroid of uploaded orders (recommended)":
-    depot_lat = float(pd.to_numeric(orders_df["lat"], errors="coerce").mean())
-    depot_lon = float(pd.to_numeric(orders_df["lon"], errors="coerce").mean())
-else:
-    c1, c2 = st.columns(2)
-    depot_lat = c1.number_input("Depot latitude", value=float(pd.to_numeric(orders_df["lat"], errors="coerce").mean()))
-    depot_lon = c2.number_input("Depot longitude", value=float(pd.to_numeric(orders_df["lon"], errors="coerce").mean()))
-
-depot_tuple = (depot_lat, depot_lon)
-st.caption(f"Depot: {depot_lat:.5f}, {depot_lon:.5f}")
+speed = st.slider("Average speed (km/h)", 15, 45, 25, 1)
+maxst = st.slider("Max stops per route", 5, 20, 10, 1)
 
 # ---------- compute ----------
 if st.button("Compute routes"):
-    df_plan = greedy(
-        orders_df[["order_id","lat","lon","tw_start","tw_end","service_min"]],
-        depot=depot_tuple,
-        speed=speed,
-        max_stops=maxst,
-        start_time_str=start_time.strftime("%H:%M")
-    )
+    df_plan = greedy(st.session_state["orders_df"], speed=speed, max_stops=maxst)
     df_plan["alert"] = df_plan.apply(
         lambda r: "Late risk" if r["eta"] != "N/A" and r["eta"] > r["tw_end"] else "",
         axis=1,
     )
-    df_plan["status"] = "Planned"
     st.session_state["routes_df"] = df_plan
-    st.session_state["dispatch_df"] = df_plan.copy()
     st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 
 # ---------- results ----------
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"].copy()
 
-    # Prefer uploaded place names (no geocoding needed)
-    if "place" in orders_df.columns:
-        df = df.merge(
-            orders_df[["order_id","lat","lon","place"]],
-            on=["order_id","lat","lon"],
-            how="left"
-        )
-
-    # Optional reverse-geocode (OFF by default)
-    use_places = st.checkbox(
-        "Fill missing place names via reverse-geocoding (OpenStreetMap)",
-        value=False
-    )
-    place_available = False
-    if use_places:
-        try:
-            from geopy.geocoders import Nominatim
-            from geopy.extra.rate_limiter import RateLimiter
-            geolocator = Nominatim(user_agent="smarthaul-demo")
-            reverse = RateLimiter(geolocator.reverse, min_delay_seconds=1)
-
-            @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-            def reverse_geocode(lat: float, lon: float) -> str:
-                try:
-                    loc = reverse((lat, lon), language="en", zoom=15)
-                    if loc:
-                        parts = [p.strip() for p in str(loc.address).split(",")]
-                        return ", ".join(parts[:3])
-                except Exception:
-                    pass
-                return ""
-            with st.spinner("Resolving names…"):
-                missing_mask = df["place"].isna() | (df["place"] == "")
-                df.loc[missing_mask, "place"] = df[missing_mask].apply(
-                    lambda r: reverse_geocode(float(r["lat"]), float(r["lon"])), axis=1
-                )
-            place_available = True
-        except Exception:
-            place_available = False
-
-    # --------- Friendly table ----------
     st.subheader("Planned routes")
     df["Stop #"] = df.groupby("vehicle_id").cumcount() + 1
     df["Time window"] = df["tw_start"].astype(str) + " – " + df["tw_end"].astype(str)
@@ -189,22 +107,19 @@ if "routes_df" in st.session_state:
     df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
 
     display_df = df.rename(columns={
-        "vehicle_id":"Vehicle", "order_id":"Order", "eta":"ETA", "alert":"Alert", "place":"Place"
+        "vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"
     })
 
     hide_coords = st.checkbox("Hide coordinates", value=True)
 
-    wanted_cols = ["Vehicle", "Stop #", "Order"]
-    if "Place" in display_df.columns:
-        wanted_cols.append("Place")
-    wanted_cols += ["ETA", "Time window", "Alert"]
+    wanted_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "Alert"]
     if not hide_coords:
         wanted_cols += ["Lat", "Lon"]
 
     cols = [c for c in wanted_cols if c in display_df.columns]
     missing = sorted(set(wanted_cols) - set(cols))
     if missing:
-        st.info(f"Skipping missing columns {missing}")
+        st.info(f"Note: Skipping missing columns {missing}")
 
     st.dataframe(
         display_df[cols],
@@ -214,7 +129,6 @@ if "routes_df" in st.session_state:
             "Vehicle": st.column_config.TextColumn("Vehicle"),
             "Stop #": st.column_config.NumberColumn("Stop #"),
             "Order": st.column_config.TextColumn("Order ID"),
-            "Place": st.column_config.TextColumn("Place"),
             "ETA": st.column_config.TextColumn("ETA"),
             "Time window": st.column_config.TextColumn("Time window"),
             "Alert": st.column_config.TextColumn("Alert"),
@@ -253,7 +167,8 @@ if "routes_df" in st.session_state:
     )
     st.dataframe(summary, hide_index=True, use_container_width=True)
 
-    # ---------- map ----------
+    st.divider()
+    st.subheader("Map")
     show_map = st.checkbox("Show map", value=True)
     if show_map:
         try:
@@ -272,10 +187,9 @@ if "routes_df" in st.session_state:
             color_map = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
             df_map["color"] = df_map["vehicle_id"].map(color_map)
 
-            # build paths (include depot point at start per-vehicle)
             rows = []
-            for v in veh_ids:
-                g = df_map[df_map["vehicle_id"] == v].sort_values("stop_idx")
+            for v, g in df_map.groupby("vehicle_id", sort=False):
+                g = g.sort_values("stop_idx")
                 pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
                 rows.append({"vehicle_id": v, "path": pts, "color": color_map[v]})
             paths = pd.DataFrame(rows)
@@ -286,24 +200,17 @@ if "routes_df" in st.session_state:
                                     get_radius=60, get_fill_color="color",
                                     get_line_color=[255, 255, 255], line_width_min_pixels=1, pickable=True)
 
-            # Labels: prefer Place; fallback to stop #
-            if "place" in df_map.columns and df_map["place"].fillna("").ne("").any():
-                df_map["label"] = df_map.apply(
-                    lambda r: f"{int(r['stop_idx'])}. {r.get('place','') or ''}".strip(), axis=1
-                )
-            else:
-                df_map["label"] = df_map.apply(lambda r: f"{int(r['stop_idx'])}", axis=1)
-
             text_layer = pdk.Layer("TextLayer", data=df_map, get_position='[lon, lat]',
-                                   get_text="label", get_size=12, get_color=[230,230,230],
-                                   get_angle=0, get_alignment_baseline="'center'")
+                                   get_text="stop_idx", get_size=12,
+                                   get_color=[230,230,230], get_angle=0,
+                                   get_alignment_baseline="'center'")
 
             view = pdk.ViewState(
                 latitude=float(df_map.lat.mean()),
                 longitude=float(df_map.lon.mean()),
                 zoom=11,
             )
-            tooltip = {"text": "{label}\nVehicle {vehicle_id}\nETA {eta}"}
+            tooltip = {"text": "Stop {stop_idx}\nVehicle {vehicle_id}\nETA {eta}"}
 
             st.pydeck_chart(pdk.Deck(
                 layers=[path_layer, point_layer, text_layer],
@@ -313,7 +220,6 @@ if "routes_df" in st.session_state:
         except Exception as e:
             st.info(f"Map rendering skipped: {e}")
 
-    # ---------- download ----------
     st.download_button(
         "Download planned routes (CSV)",
         data=df.to_csv(index=False).encode("utf-8"),
