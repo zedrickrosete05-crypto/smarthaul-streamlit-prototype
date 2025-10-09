@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import math
 
+st.set_page_config(page_title="SmartHaul – Optimize Routes", page_icon="🧭")
 st.title("🧭 Optimize Routes")
 
 # ---------- helpers ----------
@@ -86,13 +87,18 @@ if "orders_df" not in st.session_state:
 speed = st.slider("Average speed (km/h)", 15, 45, 25, 1)
 maxst = st.slider("Max stops per route", 5, 20, 10, 1)
 
+# ---------- compute ----------
 if st.button("Compute routes"):
     df_plan = greedy(st.session_state["orders_df"], speed=speed, max_stops=maxst)
     df_plan["alert"] = df_plan.apply(
         lambda r: "Late risk" if r["eta"] != "N/A" and r["eta"] > r["tw_end"] else "",
         axis=1,
     )
+    # NEW for Step 2: persist for dispatch page
+    df_plan["status"] = "Planned"
     st.session_state["routes_df"] = df_plan
+    st.session_state["dispatch_df"] = df_plan.copy()
+
     st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 
 # ---------- results ----------
@@ -162,8 +168,6 @@ if "routes_df" in st.session_state:
     df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
 
     display_df = df.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"})
-
-    # ✅ Ensure consistent casing for place column
     if "place" in display_df.columns and "Place" not in display_df.columns:
         display_df = display_df.rename(columns={"place": "Place"})
 
@@ -176,7 +180,6 @@ if "routes_df" in st.session_state:
     if not hide_coords:
         wanted_cols += ["Lat", "Lon"]
 
-    # ✅ Safe select to avoid KeyError
     cols = [c for c in wanted_cols if c in display_df.columns]
     missing = sorted(set(wanted_cols) - set(cols))
     if missing:
