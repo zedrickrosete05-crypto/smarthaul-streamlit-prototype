@@ -94,7 +94,7 @@ if st.button("Compute routes"):
         lambda r: "Late risk" if r["eta"] != "N/A" and r["eta"] > r["tw_end"] else "",
         axis=1,
     )
-    # NEW for Step 2: persist for dispatch page
+    # persist for dispatch page
     df_plan["status"] = "Planned"
     st.session_state["routes_df"] = df_plan
     st.session_state["dispatch_df"] = df_plan.copy()
@@ -114,7 +114,6 @@ if "routes_df" in st.session_state:
     place_available = False
     if use_places:
         try:
-            # Try geopy
             from geopy.geocoders import Nominatim
             from geopy.extra.rate_limiter import RateLimiter
 
@@ -137,7 +136,6 @@ if "routes_df" in st.session_state:
             place_available = True
 
         except Exception:
-            # HTTP fallback (no extra package)
             import requests
 
             @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -203,17 +201,60 @@ if "routes_df" in st.session_state:
     )
 
     st.divider()
+
+    # ---------- compact route summary (table) ----------
     st.subheader("Route summary")
-    for v, g in df.groupby("vehicle_id", sort=False):
-        stops = len(g)
-        first_eta = g["eta"].iloc[0]
-        last_eta = g["eta"].iloc[-1] if (g["eta"].iloc[-1] != "N/A") else "—"
-        alerts = int((g["alert"] != "").sum())
-        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
-        with c1: st.metric(f"{v}", f"{stops} stops")
-        with c2: st.metric("First ETA", first_eta)
-        with c3: st.metric("Last ETA", last_eta)
-        with c4: st.metric("Alerts", alerts)
+
+    def first_valid_eta(s):
+        for v in s:
+            if v != "N/A":
+                return v
+        return "—"
+
+    def last_valid_eta(s):
+        lst = list(s)
+        for v in reversed(lst):
+            if v != "N/A":
+                return v
+        return "—"
+
+    summary = (
+        df.sort_values(["vehicle_id", "eta"], kind="mergesort")
+          .groupby("vehicle_id", sort=False)
+          .agg(
+              Stops=("order_id", "count"),
+              **{"First ETA": ("eta", first_valid_eta)},
+              **{"Last ETA": ("eta", last_valid_eta)},
+              Alerts=("alert", lambda s: int((s != "").sum())),
+          )
+          .reset_index()
+          .rename(columns={"vehicle_id": "Vehicle"})
+    )
+
+    only_alerts = st.checkbox("Show only vehicles with alerts", value=False)
+    if only_alerts:
+        summary = summary[summary["Alerts"] > 0]
+
+    totals = pd.DataFrame([{
+        "Vehicle": "TOTAL",
+        "Stops": int(summary["Stops"].sum()),
+        "First ETA": "",
+        "Last ETA": "",
+        "Alerts": int(summary["Alerts"].sum()),
+    }])
+
+    st.dataframe(
+        pd.concat([summary, totals], ignore_index=True),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Vehicle": st.column_config.TextColumn("Vehicle"),
+            "Stops": st.column_config.NumberColumn("Stops", format="%d"),
+            "First ETA": st.column_config.TextColumn("First ETA"),
+            "Last ETA": st.column_config.TextColumn("Last ETA"),
+            "Alerts": st.column_config.NumberColumn("Alerts", format="%d"),
+        },
+    )
 
     # ---------- map (connected path + labels using place names if available) ----------
     show_map = st.checkbox("Show map", value=True)
