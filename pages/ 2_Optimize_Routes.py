@@ -41,33 +41,24 @@ def greedy(df, depot=(14.5995, 120.9842), speed=25.0, max_stops=10):
             i, drive, start = sorted(cand, key=lambda x: x[1])[0]
             r = orders.loc[i]
             leave = start + timedelta(minutes=r.service_min)
-            route.append(
-                dict(
-                    vehicle_id=f"V{vid}",
-                    order_id=r.order_id,
-                    lat=r.lat,
-                    lon=r.lon,
-                    eta=start.strftime("%H:%M"),
-                    tw_start=r.tw_start,
-                    tw_end=r.tw_end,
-                )
-            )
+            route.append(dict(
+                vehicle_id=f"V{vid}",
+                order_id=r.order_id,
+                lat=r.lat, lon=r.lon,
+                eta=start.strftime("%H:%M"),
+                tw_start=r.tw_start, tw_end=r.tw_end
+            ))
             orders.at[i, "done"] = True
             lat, lon, now = r.lat, r.lon, leave
         if route:
-            routes.append(pd.DataFrame(route))
-            vid += 1
+            routes.append(pd.DataFrame(route)); vid += 1
         else:
-            i = orders[~orders.done].index[0]
-            r = orders.loc[i]
-            routes.append(
-                pd.DataFrame(
-                    [dict(vehicle_id=f"V{vid}", order_id=r.order_id, lat=r.lat, lon=r.lon,
-                          eta="N/A", tw_start=r.tw_start, tw_end=r.tw_end)]
-                )
-            )
-            orders.at[i, "done"] = True
-            vid += 1
+            i = orders[~orders.done].index[0]; r = orders.loc[i]
+            routes.append(pd.DataFrame([dict(
+                vehicle_id=f"V{vid}", order_id=r.order_id, lat=r.lat, lon=r.lon,
+                eta="N/A", tw_start=r.tw_start, tw_end=r.tw_end
+            )]))
+            orders.at[i, "done"] = True; vid += 1
     return pd.concat(routes, ignore_index=True)
 
 # ---------- require data ----------
@@ -87,7 +78,7 @@ if st.button("Compute routes"):
     st.session_state["routes_df"] = df_plan
     st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 
-# ---------- show results + map + download ----------
+# ---------- show results + (optional) map + download ----------
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"]
     st.dataframe(df, use_container_width=True)
