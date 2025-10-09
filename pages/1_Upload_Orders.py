@@ -1,3 +1,7 @@
+from branding import setup_page, header
+setup_page("SmartHaul – Upload Orders")
+header("Upload Orders")
+
 import pandas as pd
 import streamlit as st
 
