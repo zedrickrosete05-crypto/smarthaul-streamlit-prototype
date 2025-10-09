@@ -1,7 +1,6 @@
-# pages/2_Optimize_Routes.py
 import streamlit as st
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 import math
 
 st.set_page_config(page_title="SmartHaul – Optimize Routes", page_icon="🧭")
@@ -20,10 +19,21 @@ def travel_min(a, b, c, d, speed: float = 25.0) -> float:
     return (haversine_km(a, b, c, d) / max(speed, 5)) * 60.0
 
 def t(s: str) -> datetime:
-    return datetime.strptime(str(s), "%H:%M")
+    s = str(s)
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+    return datetime.strptime("08:00", "%H:%M")
 
 # ---------- greedy planner ----------
-def greedy(df: pd.DataFrame, depot=(14.5995, 120.9842), speed: float = 25.0, max_stops: int = 10) -> pd.DataFrame:
+def greedy(df: pd.DataFrame,
+           depot=(14.5995, 120.9842),
+           speed: float = 25.0,
+           max_stops: int = 10,
+           start_time_str: str = "08:00") -> pd.DataFrame:
+
     orders = df.copy().reset_index(drop=True)
     orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
     orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
@@ -35,7 +45,7 @@ def greedy(df: pd.DataFrame, depot=(14.5995, 120.9842), speed: float = 25.0, max
     routes, vid = [], 1
     while not orders.done.all():
         lat, lon = depot
-        now = t("08:00")
+        now = t(start_time_str)
         route = []
 
         while True:
@@ -84,39 +94,71 @@ if "orders_df" not in st.session_state:
     st.warning("Upload orders first on the Upload page.")
     st.stop()
 
-speed = st.slider("Average speed (km/h)", 15, 45, 25, 1)
-maxst = st.slider("Max stops per route", 5, 20, 10, 1)
+orders_df = st.session_state["orders_df"]
+
+# Controls
+speed = st.slider("Average speed (km/h)", 15, 60, 30, 1)
+maxst = st.slider("Max stops per route", 5, 30, 10, 1)
+start_time = st.time_input("Start time", value=dtime(8, 0), help="Driver leaves depot at this time")
+
+depot_mode = st.radio(
+    "Depot location",
+    ["Use centroid of uploaded orders (recommended)", "Enter manually"],
+    index=0,
+    help="Make sure depot is near your orders so ETAs are feasible."
+)
+
+if depot_mode == "Use centroid of uploaded orders (recommended)":
+    depot_lat = float(pd.to_numeric(orders_df["lat"], errors="coerce").mean())
+    depot_lon = float(pd.to_numeric(orders_df["lon"], errors="coerce").mean())
+else:
+    c1, c2 = st.columns(2)
+    depot_lat = c1.number_input("Depot latitude", value=float(pd.to_numeric(orders_df["lat"], errors="coerce").mean()))
+    depot_lon = c2.number_input("Depot longitude", value=float(pd.to_numeric(orders_df["lon"], errors="coerce").mean()))
+
+depot_tuple = (depot_lat, depot_lon)
+st.caption(f"Depot: {depot_lat:.5f}, {depot_lon:.5f}")
 
 # ---------- compute ----------
 if st.button("Compute routes"):
-    df_plan = greedy(st.session_state["orders_df"], speed=speed, max_stops=maxst)
+    df_plan = greedy(
+        orders_df[["order_id","lat","lon","tw_start","tw_end","service_min"]],
+        depot=depot_tuple,
+        speed=speed,
+        max_stops=maxst,
+        start_time_str=start_time.strftime("%H:%M")
+    )
     df_plan["alert"] = df_plan.apply(
         lambda r: "Late risk" if r["eta"] != "N/A" and r["eta"] > r["tw_end"] else "",
         axis=1,
     )
-    # persist for dispatch page
     df_plan["status"] = "Planned"
     st.session_state["routes_df"] = df_plan
     st.session_state["dispatch_df"] = df_plan.copy()
-
     st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 
 # ---------- results ----------
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"].copy()
 
-    # Optional place names (reverse-geocode) with automatic fallback
+    # Prefer uploaded place names (no geocoding needed)
+    if "place" in orders_df.columns:
+        df = df.merge(
+            orders_df[["order_id","lat","lon","place"]],
+            on=["order_id","lat","lon"],
+            how="left"
+        )
+
+    # Optional reverse-geocode (OFF by default)
     use_places = st.checkbox(
-        "Show place names (reverse-geocode via OpenStreetMap)",
-        value=False,
-        help="Uses geopy if installed, otherwise HTTP fallback to OSM Nominatim (cached).",
+        "Fill missing place names via reverse-geocoding (OpenStreetMap)",
+        value=False
     )
     place_available = False
     if use_places:
         try:
             from geopy.geocoders import Nominatim
             from geopy.extra.rate_limiter import RateLimiter
-
             geolocator = Nominatim(user_agent="smarthaul-demo")
             reverse = RateLimiter(geolocator.reverse, min_delay_seconds=1)
 
@@ -130,44 +172,25 @@ if "routes_df" in st.session_state:
                 except Exception:
                     pass
                 return ""
-
-            with st.spinner("Resolving place names..."):
-                df["place"] = df.apply(lambda r: reverse_geocode(float(r["lat"]), float(r["lon"])), axis=1)
+            with st.spinner("Resolving names…"):
+                missing_mask = df["place"].isna() | (df["place"] == "")
+                df.loc[missing_mask, "place"] = df[missing_mask].apply(
+                    lambda r: reverse_geocode(float(r["lat"]), float(r["lon"])), axis=1
+                )
             place_available = True
-
         except Exception:
-            import requests
+            place_available = False
 
-            @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-            def reverse_geocode_http(lat: float, lon: float) -> str:
-                try:
-                    url = "https://nominatim.openstreetmap.org/reverse"
-                    params = {"lat": lat, "lon": lon, "format": "json", "zoom": 17, "addressdetails": 1}
-                    headers = {"User-Agent": "smarthaul-demo/1.0 (contact: example@example.com)"}
-                    resp = requests.get(url, params=params, headers=headers, timeout=10)
-                    resp.raise_for_status()
-                    disp = resp.json().get("display_name", "")
-                    parts = [p.strip() for p in disp.split(",")]
-                    return ", ".join(parts[:3])
-                except Exception:
-                    return ""
-
-            with st.spinner("Resolving place names..."):
-                df["place"] = df.apply(lambda r: reverse_geocode_http(float(r["lat"]), float(r["lon"])), axis=1)
-            st.info("Using HTTP fallback for reverse geocoding (geopy not installed).")
-            place_available = True
-
-    # --------- Friendly table (Place shown, coords optional) ----------
+    # --------- Friendly table ----------
     st.subheader("Planned routes")
-
     df["Stop #"] = df.groupby("vehicle_id").cumcount() + 1
     df["Time window"] = df["tw_start"].astype(str) + " – " + df["tw_end"].astype(str)
     df["Lat"] = pd.to_numeric(df["lat"], errors="coerce").round(4)
     df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
 
-    display_df = df.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"})
-    if "place" in display_df.columns and "Place" not in display_df.columns:
-        display_df = display_df.rename(columns={"place": "Place"})
+    display_df = df.rename(columns={
+        "vehicle_id":"Vehicle", "order_id":"Order", "eta":"ETA", "alert":"Alert", "place":"Place"
+    })
 
     hide_coords = st.checkbox("Hide coordinates", value=True)
 
@@ -181,7 +204,7 @@ if "routes_df" in st.session_state:
     cols = [c for c in wanted_cols if c in display_df.columns]
     missing = sorted(set(wanted_cols) - set(cols))
     if missing:
-        st.info(f"Note: Skipping missing columns {missing}")
+        st.info(f"Skipping missing columns {missing}")
 
     st.dataframe(
         display_df[cols],
@@ -201,8 +224,6 @@ if "routes_df" in st.session_state:
     )
 
     st.divider()
-
-    # ---------- compact route summary (table) ----------
     st.subheader("Route summary")
 
     def first_valid_eta(s):
@@ -230,43 +251,16 @@ if "routes_df" in st.session_state:
           .reset_index()
           .rename(columns={"vehicle_id": "Vehicle"})
     )
+    st.dataframe(summary, hide_index=True, use_container_width=True)
 
-    only_alerts = st.checkbox("Show only vehicles with alerts", value=False)
-    if only_alerts:
-        summary = summary[summary["Alerts"] > 0]
-
-    totals = pd.DataFrame([{
-        "Vehicle": "TOTAL",
-        "Stops": int(summary["Stops"].sum()),
-        "First ETA": "",
-        "Last ETA": "",
-        "Alerts": int(summary["Alerts"].sum()),
-    }])
-
-    st.dataframe(
-        pd.concat([summary, totals], ignore_index=True),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Vehicle": st.column_config.TextColumn("Vehicle"),
-            "Stops": st.column_config.NumberColumn("Stops", format="%d"),
-            "First ETA": st.column_config.TextColumn("First ETA"),
-            "Last ETA": st.column_config.TextColumn("Last ETA"),
-            "Alerts": st.column_config.NumberColumn("Alerts", format="%d"),
-        },
-    )
-
-    # ---------- map (connected path + labels using place names if available) ----------
+    # ---------- map ----------
     show_map = st.checkbox("Show map", value=True)
     if show_map:
         try:
             import pydeck as pdk
             import numpy as np
 
-            df_map = st.session_state["routes_df"].copy()
-            if place_available and "place" in df.columns:
-                df_map["place"] = df["place"]
-
+            df_map = df.copy()
             df_map["stop_idx"] = df_map.groupby("vehicle_id").cumcount() + 1
             df_map = df_map.sort_values(["vehicle_id", "stop_idx"], kind="mergesort").reset_index(drop=True)
 
@@ -278,132 +272,51 @@ if "routes_df" in st.session_state:
             color_map = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
             df_map["color"] = df_map["vehicle_id"].map(color_map)
 
-            include_depot = st.checkbox("Include depot as starting point", value=True)
-            if include_depot and len(df_map):
-                depots = (
-                    df_map.groupby("vehicle_id", sort=False)
-                          .first()[["lon", "lat"]]
-                          .reset_index()
-                          .rename(columns={"lon": "d_lon", "lat": "d_lat"})
-                )
-                df_map = df_map.merge(depots, on="vehicle_id", how="left")
-            else:
-                df_map["d_lon"] = float("nan")
-                df_map["d_lat"] = float("nan")
-
+            # build paths (include depot point at start per-vehicle)
             rows = []
-            for v, g in df_map.groupby("vehicle_id", sort=False):
-                g = g.sort_values("stop_idx")
+            for v in veh_ids:
+                g = df_map[df_map["vehicle_id"] == v].sort_values("stop_idx")
                 pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
-                if include_depot and pd.notna(g["d_lon"].iloc[0]) and pd.notna(g["d_lat"].iloc[0]):
-                    pts = [{"lon": float(g["d_lon"].iloc[0]), "lat": float(g["d_lat"].iloc[0])}] + pts
                 rows.append({"vehicle_id": v, "path": pts, "color": color_map[v]})
             paths = pd.DataFrame(rows)
 
-            path_layer = pdk.Layer(
-                "PathLayer",
-                data=paths,
-                get_path="path",
-                get_width=4,
-                get_color="color",
-                width_min_pixels=2,
-                pickable=False,
-            )
+            path_layer = pdk.Layer("PathLayer", data=paths, get_path="path", get_width=4,
+                                   get_color="color", width_min_pixels=2, pickable=False)
+            point_layer = pdk.Layer("ScatterplotLayer", data=df_map, get_position='[lon, lat]',
+                                    get_radius=60, get_fill_color="color",
+                                    get_line_color=[255, 255, 255], line_width_min_pixels=1, pickable=True)
 
-            point_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=df_map,
-                get_position='[lon, lat]',
-                get_radius=60,
-                get_fill_color="color",
-                get_line_color=[255, 255, 255],
-                line_width_min_pixels=1,
-                pickable=True,
-            )
-
-            # Labels: prefer place names; otherwise just stop number
-            if "place" in df_map.columns and df_map["place"].notna().any():
+            # Labels: prefer Place; fallback to stop #
+            if "place" in df_map.columns and df_map["place"].fillna("").ne("").any():
                 df_map["label"] = df_map.apply(
-                    lambda r: f"{int(r['stop_idx'])}. {r['place']}" if pd.notna(r.get('place')) and r.get('place') else f"{int(r['stop_idx'])}",
-                    axis=1,
+                    lambda r: f"{int(r['stop_idx'])}. {r.get('place','') or ''}".strip(), axis=1
                 )
             else:
                 df_map["label"] = df_map.apply(lambda r: f"{int(r['stop_idx'])}", axis=1)
 
-            text_layer = pdk.Layer(
-                "TextLayer",
-                data=df_map,
-                get_position='[lon, lat]',
-                get_text="label",
-                get_size=12,
-                get_color=[230, 230, 230],
-                get_angle=0,
-                get_alignment_baseline="'center'",
-            )
-
-            starts = df_map[df_map["stop_idx"] == 1]
-            ends = df_map.loc[df_map.groupby("vehicle_id")["stop_idx"].idxmax()]
-
-            start_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=starts,
-                get_position='[lon, lat]',
-                get_radius=90,
-                get_fill_color=[255, 255, 0],
-                get_line_color=[0, 0, 0],
-                line_width_min_pixels=2,
-            )
-            start_text = pdk.Layer(
-                "TextLayer",
-                data=starts.assign(lbl="START"),
-                get_position='[lon, lat]',
-                get_text="lbl",
-                get_size=14,
-                get_color=[255, 255, 0],
-                get_alignment_baseline="'top'",
-            )
-
-            end_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=ends,
-                get_position='[lon, lat]',
-                get_radius=90,
-                get_fill_color=[255, 59, 48],
-                get_line_color=[0, 0, 0],
-                line_width_min_pixels=2,
-            )
-            end_text = pdk.Layer(
-                "TextLayer",
-                data=ends.assign(lbl="END"),
-                get_position='[lon, lat]',
-                get_text="lbl",
-                get_size=14,
-                get_color=[255, 59, 48],
-                get_alignment_baseline="'bottom'",
-            )
+            text_layer = pdk.Layer("TextLayer", data=df_map, get_position='[lon, lat]',
+                                   get_text="label", get_size=12, get_color=[230,230,230],
+                                   get_angle=0, get_alignment_baseline="'center'")
 
             view = pdk.ViewState(
                 latitude=float(df_map.lat.mean()),
                 longitude=float(df_map.lon.mean()),
                 zoom=11,
             )
-
             tooltip = {"text": "{label}\nVehicle {vehicle_id}\nETA {eta}"}
 
-            st.pydeck_chart(
-                pdk.Deck(
-                    layers=[path_layer, point_layer, text_layer, start_layer, start_text, end_layer, end_text],
-                    initial_view_state=view,
-                    tooltip=tooltip,
-                )
-            )
+            st.pydeck_chart(pdk.Deck(
+                layers=[path_layer, point_layer, text_layer],
+                initial_view_state=view,
+                tooltip=tooltip,
+            ))
         except Exception as e:
             st.info(f"Map rendering skipped: {e}")
 
     # ---------- download ----------
     st.download_button(
         "Download planned routes (CSV)",
-        data=st.session_state["routes_df"].to_csv(index=False).encode("utf-8"),
+        data=df.to_csv(index=False).encode("utf-8"),
         file_name="routes_plan.csv",
         mime="text/csv",
     )
