@@ -1,3 +1,7 @@
+from branding import setup_page, header
+setup_page("SmartHaul – Optimize Routes")
+header("Optimize Routes")
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
