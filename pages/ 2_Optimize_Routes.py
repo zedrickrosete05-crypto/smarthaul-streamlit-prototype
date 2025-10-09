@@ -163,14 +163,24 @@ if "routes_df" in st.session_state:
 
     display_df = df.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"})
 
+    # ✅ Ensure consistent casing for place column
+    if "place" in display_df.columns and "Place" not in display_df.columns:
+        display_df = display_df.rename(columns={"place": "Place"})
+
     hide_coords = st.checkbox("Hide coordinates", value=True)
 
-    cols = ["Vehicle", "Stop #", "Order"]
-    if "place" in df.columns:
-        cols.append("Place")
-    cols += ["ETA", "Time window", "Alert"]
+    wanted_cols = ["Vehicle", "Stop #", "Order"]
+    if "Place" in display_df.columns:
+        wanted_cols.append("Place")
+    wanted_cols += ["ETA", "Time window", "Alert"]
     if not hide_coords:
-        cols += ["Lat", "Lon"]
+        wanted_cols += ["Lat", "Lon"]
+
+    # ✅ Safe select to avoid KeyError
+    cols = [c for c in wanted_cols if c in display_df.columns]
+    missing = sorted(set(wanted_cols) - set(cols))
+    if missing:
+        st.info(f"Note: Skipping missing columns {missing}")
 
     st.dataframe(
         display_df[cols],
@@ -270,7 +280,7 @@ if "routes_df" in st.session_state:
             # Labels: prefer place names; otherwise just stop number
             if "place" in df_map.columns and df_map["place"].notna().any():
                 df_map["label"] = df_map.apply(
-                    lambda r: f"{int(r['stop_idx'])}. {r['place']}" if r.get("place") else f"{int(r['stop_idx'])}",
+                    lambda r: f"{int(r['stop_idx'])}. {r['place']}" if pd.notna(r.get('place')) and r.get('place') else f"{int(r['stop_idx'])}",
                     axis=1,
                 )
             else:
@@ -334,7 +344,6 @@ if "routes_df" in st.session_state:
                 zoom=11,
             )
 
-            # Tooltip shows the same label (with place if available) + ETA
             tooltip = {"text": "{label}\nVehicle {vehicle_id}\nETA {eta}"}
 
             st.pydeck_chart(
