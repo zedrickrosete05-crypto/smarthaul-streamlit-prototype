@@ -5,7 +5,7 @@ import math
 
 st.title("🧭 Optimize Routes")
 
-# --- helpers ---
+# ---------- helpers ----------
 def haversine_km(a, b, c, d):
     R = 6371.0088
     p1, p2 = math.radians(a), math.radians(c)
@@ -15,9 +15,9 @@ def haversine_km(a, b, c, d):
     return 2 * R * math.asin(math.sqrt(x))
 
 def travel_min(a, b, c, d, speed=25.0):
-    return (haversine_km(a, b, c, d) / max(speed, 5)) * 60
+    return (haversine_km(a, b, c, d) / max(speed, 5)) * 60.0
 
-def t(s):
+def t(s):  # "08:30" -> datetime
     return datetime.strptime(s, "%H:%M")
 
 def greedy(df, depot=(14.5995, 120.9842), speed=25.0, max_stops=10):
@@ -62,24 +62,15 @@ def greedy(df, depot=(14.5995, 120.9842), speed=25.0, max_stops=10):
             r = orders.loc[i]
             routes.append(
                 pd.DataFrame(
-                    [
-                        dict(
-                            vehicle_id=f"V{vid}",
-                            order_id=r.order_id,
-                            lat=r.lat,
-                            lon=r.lon,
-                            eta="N/A",
-                            tw_start=r.tw_start,
-                            tw_end=r.tw_end,
-                        )
-                    ]
+                    [dict(vehicle_id=f"V{vid}", order_id=r.order_id, lat=r.lat, lon=r.lon,
+                          eta="N/A", tw_start=r.tw_start, tw_end=r.tw_end)]
                 )
             )
             orders.at[i, "done"] = True
             vid += 1
     return pd.concat(routes, ignore_index=True)
 
-# --- require data ---
+# ---------- require data ----------
 if "orders_df" not in st.session_state:
     st.warning("Upload orders first on the Upload page.")
     st.stop()
@@ -94,11 +85,9 @@ if st.button("Compute routes"):
         axis=1,
     )
     st.session_state["routes_df"] = df_plan
-    st.success(
-        f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops."
-    )
+    st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 
-# --- show results + map + download ---
+# ---------- show results + map + download ----------
 if "routes_df" in st.session_state:
     df = st.session_state["routes_df"]
     st.dataframe(df, use_container_width=True)
@@ -108,7 +97,6 @@ if "routes_df" in st.session_state:
         try:
             import pydeck as pdk
 
-            # build ordered path per vehicle
             def path_from_group(g):
                 return [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
 
@@ -118,31 +106,13 @@ if "routes_df" in st.session_state:
                   .reset_index(name="path")
             )
 
-            path_layer = pdk.Layer(
-                "PathLayer",
-                data=paths,
-                get_path="path",
-                get_width=3,
-                width_min_pixels=2,
-                pickable=False,
-            )
-            point_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=df,
-                get_position='[lon, lat]',
-                get_radius=40,
-                pickable=True,
-            )
-            view = pdk.ViewState(
-                latitude=float(df.lat.mean()),
-                longitude=float(df.lon.mean()),
-                zoom=11,
-            )
+            path_layer = pdk.Layer("PathLayer", data=paths, get_path="path", get_width=3, width_min_pixels=2)
+            point_layer = pdk.Layer("ScatterplotLayer", data=df, get_position='[lon, lat]', get_radius=40)
+            view = pdk.ViewState(latitude=float(df.lat.mean()), longitude=float(df.lon.mean()), zoom=11)
             st.pydeck_chart(pdk.Deck(layers=[path_layer, point_layer], initial_view_state=view))
         except Exception as e:
             st.info(f"Map rendering skipped: {e}")
 
-    # download CSV
     st.download_button(
         "Download planned routes (CSV)",
         data=df.to_csv(index=False).encode("utf-8"),
