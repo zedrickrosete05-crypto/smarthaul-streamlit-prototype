@@ -1,12 +1,6 @@
-# --- SmartHaul branding ---
-import streamlit as st
-from pathlib import Path
-LOGO = "smarthaul-logo.png"  # change to "pages/smarthaul-logo.png" if logo is inside /pages
-st.set_page_config(page_title="SmartHaul – Upload Orders", page_icon=LOGO, layout="wide")
-if Path(LOGO).exists():
-    st.sidebar.image(LOGO, use_column_width=True)
-st.markdown("<h1 style='margin:0'>SmartHaul</h1><p>Upload Orders</p><hr>", unsafe_allow_html=True)
-# --- end branding ---
+from branding import setup_branding, smarthaul_header
+setup_branding("SmartHaul – Upload Orders")
+smarthaul_header("Upload Orders")
        
 import pandas as pd
 import streamlit as st
