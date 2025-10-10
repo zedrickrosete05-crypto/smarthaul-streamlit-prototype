@@ -1,41 +1,39 @@
-# --- SmartHaul logo (auto-detect) ---
-import os, streamlit as st
+# --- SmartHaul branding (compact) ---
+import streamlit as st
 from pathlib import Path
 
 def _find_logo() -> str | None:
     here = Path(__file__).resolve().parent
-    # common spots (root, pages/)
-    candidates = [
-        Path("smarthaul-logo.png"),
-        here / "smarthaul-logo.png",
-        here.parent / "smarthaul-logo.png",
-        Path("pages/smarthaul-logo.png"),
-        here / "pages" / "smarthaul-logo.png",
-        here.parent / "pages" / "smarthaul-logo.png",
-    ]
-    for p in candidates:
+    for p in (
+        Path("smarthaul-logo.png"),                 # repo root (recommended)
+        here / "smarthaul-logo.png",                # same folder as page
+        here.parent / "smarthaul-logo.png",         # repo root when in /pages
+        Path("pages/smarthaul-logo.png"),           # inside /pages
+    ):
         if p.exists():
             return str(p)
-    # last resort: search repo for anything like *smart*haul*.png
-    for root in {Path("."), here, here.parent}:
-        hits = list(root.rglob("*smart*haul*.png"))
-        if hits:
-            return str(hits[0])
     return None
 
 LOGO = _find_logo()
-st.set_page_config(page_title="SmartHaul", page_icon=(LOGO or "🚚"), layout="wide")
-if LOGO:
-    st.sidebar.image(LOGO, use_column_width=True)
+st.set_page_config(
+    page_title="SmartHaul",
+    page_icon=(LOGO or "🚚"),
+    layout="wide",
+)
 
-# quick diagnostics (collapse when you’re done)
-with st.expander("Branding debug", expanded=False):
-    st.write("Working dir:", os.getcwd())
-    st.write("This file:", str(Path(__file__).resolve()))
-    st.write("Logo found:", bool(LOGO), LOGO or "—")
-    if LOGO:
-        st.image(LOGO, caption="Inline check (should show the logo)")
-# -------------------------------------
+# Sidebar logo: small & fixed width (no large stretching)
+if LOGO:
+    st.sidebar.image(LOGO, width=120)  # <= adjust smaller/bigger if you like
+
+def smarthaul_header(subtitle: str = ""):
+    left, right = st.columns([0.1, 0.9])
+    with left:
+        if LOGO:
+            st.image(LOGO, width=36)   # <= tiny header logo
+        else:
+            st.write("🚚")
+    with right:
+       
 
 
 import pandas as pd
