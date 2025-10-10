@@ -1,6 +1,7 @@
 [theme]
-base = "light"                     # << switch to light mode
-primaryColor = "#0B3C5D"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F6F8FB"
-textColor = "#0B3C5D"
+# SmartHaul brand palette
+primaryColor = "#0B3C5D"            # brand blue (buttons, sliders)
+backgroundColor = "#0E1117"         # app background
+secondaryBackgroundColor = "#161B22" # cards/blocks
+textColor = "#E6EEF6"               # text
+font = "sans serif"
