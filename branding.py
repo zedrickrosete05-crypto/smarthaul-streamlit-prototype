@@ -2,17 +2,19 @@
 from pathlib import Path
 import streamlit as st
 
-# === tweak sizes here ===
-SIDEBAR_FILL = True           # fill sidebar width
-SIDEBAR_LOGO_WIDTH = 260      # used if SIDEBAR_FILL is False
-HEADER_LOGO_WIDTH  = 140      # big header logo (px)
-# =========================
+# ==== ONE PLACE TO TUNE SIZES/COLORS ====
+SIDEBAR_FILL = True              # True = fill sidebar width
+SIDEBAR_LOGO_WIDTH = 260         # used only if SIDEBAR_FILL is False
+HEADER_LOGO_WIDTH  = 140         # big logo in page header (px)
+ACCENT = "#0B3C5D"               # brand blue (must match config.toml)
+TEXT_MUTED = "rgba(230,238,246,.75)"
+# =======================================
 
 def _find_logo() -> str | None:
     here = Path(__file__).resolve().parent
     for p in (
         Path("smarthaul-logo.png"),            # repo root (recommended)
-        here / "smarthaul-logo.png",           # same folder as branding.py
+        here / "smarthaul-logo.png",           # next to branding.py
         here / "pages" / "smarthaul-logo.png", # inside /pages
     ):
         if p.exists():
@@ -21,22 +23,48 @@ def _find_logo() -> str | None:
 
 LOGO = _find_logo()
 
-def setup_branding(page_title: str):
-    """Set page title/icon and show a larger logo in the sidebar."""
+def setup_branding(page_title: str, subtitle: str):
+    """Set page config, paint sidebar logo, and render a large header."""
     st.set_page_config(page_title=page_title, page_icon=(LOGO or "🚚"), layout="wide")
+
+    # Sidebar branding
     if LOGO:
         if SIDEBAR_FILL:
-            # fill the sidebar with the logo (new Streamlit param)
             st.sidebar.image(LOGO, use_container_width=True)
         else:
             st.sidebar.image(LOGO, width=SIDEBAR_LOGO_WIDTH)
 
-def smarthaul_header(subtitle: str):
-    """
-    Header with a larger logo + subtitle.
-    Increase the left column ratio to give the logo more room.
-    """
-    col1, col2 = st.columns([0.22, 0.78])   # more space for the logo
+    # Global CSS (cards, headings, metrics, buttons)
+    st.markdown(f"""
+    <style>
+      /* tighten default paddings */
+      .block-container {{ padding-top: 1.0rem; }}
+
+      /* page title section tweaks */
+      .sh-title {{ display:flex; gap:1rem; align-items:center; }}
+      .sh-subtitle {{ margin:.25rem 0 0; color:{TEXT_MUTED}; }}
+
+      /* buttons */
+      .stButton>button {{
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.06);
+        background: linear-gradient(180deg, {ACCENT} 0%, #08283F 100%);
+      }}
+
+      /* dataframes */
+      .stDataFrame div[data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
+
+      /* section divider */
+      hr.sh-divider {{
+        border: 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,.12), transparent);
+        margin: .9rem 0 1.1rem 0;
+      }}
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Header
+    col1, col2 = st.columns([0.18, 0.82])
     with col1:
         if LOGO:
             st.image(LOGO, width=HEADER_LOGO_WIDTH)
@@ -44,8 +72,23 @@ def smarthaul_header(subtitle: str):
             st.write("🚚")
     with col2:
         st.markdown(
-            f"<h1 style='margin:0'>SmartHaul</h1>"
-            f"<p style='margin:.35rem 0 0;opacity:.8'>{subtitle}</p>",
-            unsafe_allow_html=True
+            f"""
+            <div class="sh-title">
+              <div>
+                <h1 style="margin:0">SmartHaul</h1>
+                <p class="sh-subtitle">{subtitle}</p>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    st.divider()
+    st.markdown('<hr class="sh-divider"/>', unsafe_allow_html=True)
+
+def section(title: str, anchor: str | None = None):
+    """Nice section header."""
+    a = f' id="{anchor}"' if anchor else ""
+    st.markdown(
+        f'<h2{a} style="margin:.25rem 0 .35rem 0;">{title}</h2>'
+        f'<p class="sh-subtitle"> </p>',
+        unsafe_allow_html=True,
+    )
