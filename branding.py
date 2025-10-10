@@ -1,39 +1,38 @@
-# --- SmartHaul branding (robust) ---
-import os, streamlit as st
+# branding.py
 from pathlib import Path
+import streamlit as st
 
 def _find_logo() -> str | None:
-    """
-    Look for 'smarthaul-logo.png' in common spots and, if needed,
-    search the repo for any *smart*haul*.png file.
-    """
     here = Path(__file__).resolve().parent
-    candidates = [
-        Path("smarthaul-logo.png"),
-        here / "smarthaul-logo.png",
-        here.parent / "smarthaul-logo.png",
-        Path("pages/smarthaul-logo.png"),
-        here / "pages" / "smarthaul-logo.png",
-        here.parent / "pages" / "smarthaul-logo.png",
-    ]
-    for p in candidates:
+    for p in (
+        Path("smarthaul-logo.png"),       # repo root (recommended)
+        here / "smarthaul-logo.png",      # same folder as branding.py
+        here / "pages" / "smarthaul-logo.png",   # inside /pages
+    ):
         if p.exists():
             return str(p)
-
-    # last resort: search recursively for something that looks like the logo
-    for root in {Path("."), here, here.parent}:
-        matches = list(root.rglob("*smart*haul*.png"))
-        if matches:
-            return str(matches[0])
     return None
 
 LOGO = _find_logo()
-st.set_page_config(page_title="SmartHaul", page_icon=(LOGO or "🚚"), layout="wide")
-if LOGO:
-    st.sidebar.image(LOGO, use_column_width=True)
-# (optional) show quick diagnostics; collapse when not needed
-with st.expander("Branding debug", expanded=False):
-    st.write("Working dir:", os.getcwd())
-    st.write("This file:", str(Path(__file__).resolve()))
-    st.write("Logo found:", bool(LOGO), LOGO or "—")
-# -----------------------------------
+
+def setup_branding(page_title: str):
+    """Set page title/icon and show a small logo in the sidebar."""
+    st.set_page_config(page_title=page_title, page_icon=(LOGO or "🚚"), layout="wide")
+    if LOGO:
+        st.sidebar.image(LOGO, width=120)  # small sidebar logo
+
+def smarthaul_header(subtitle: str):
+    """Tiny header (logo + subtitle) used on every page."""
+    col1, col2 = st.columns([0.08, 0.92])
+    with col1:
+        if LOGO:
+            st.image(LOGO, width=36)       # tiny header logo
+        else:
+            st.write("🚚")
+    with col2:
+        st.markdown(
+            f"<h1 style='margin:0'>SmartHaul</h1>"
+            f"<p style='margin:.25rem 0 0;opacity:.8'>{subtitle}</p>",
+            unsafe_allow_html=True
+        )
+    st.divider()
