@@ -2,9 +2,11 @@
 from pathlib import Path
 import streamlit as st
 
-# Tweak these two numbers to change sizes app-wide
-SIDEBAR_LOGO_WIDTH = 200   # was 120
-HEADER_LOGO_WIDTH  = 80    # was 36
+# === tweak sizes here ===
+SIDEBAR_FILL = True           # fill sidebar width
+SIDEBAR_LOGO_WIDTH = 260      # used if SIDEBAR_FILL is False
+HEADER_LOGO_WIDTH  = 140      # big header logo (px)
+# =========================
 
 def _find_logo() -> str | None:
     here = Path(__file__).resolve().parent
@@ -20,14 +22,21 @@ def _find_logo() -> str | None:
 LOGO = _find_logo()
 
 def setup_branding(page_title: str):
-    """Set page title/icon and show a big logo in the sidebar."""
+    """Set page title/icon and show a larger logo in the sidebar."""
     st.set_page_config(page_title=page_title, page_icon=(LOGO or "🚚"), layout="wide")
     if LOGO:
-        st.sidebar.image(LOGO, width=SIDEBAR_LOGO_WIDTH)
+        if SIDEBAR_FILL:
+            # fill the sidebar with the logo (new Streamlit param)
+            st.sidebar.image(LOGO, use_container_width=True)
+        else:
+            st.sidebar.image(LOGO, width=SIDEBAR_LOGO_WIDTH)
 
 def smarthaul_header(subtitle: str):
-    """Header with bigger logo + subtitle."""
-    col1, col2 = st.columns([0.1, 0.9])
+    """
+    Header with a larger logo + subtitle.
+    Increase the left column ratio to give the logo more room.
+    """
+    col1, col2 = st.columns([0.22, 0.78])   # more space for the logo
     with col1:
         if LOGO:
             st.image(LOGO, width=HEADER_LOGO_WIDTH)
@@ -36,7 +45,7 @@ def smarthaul_header(subtitle: str):
     with col2:
         st.markdown(
             f"<h1 style='margin:0'>SmartHaul</h1>"
-            f"<p style='margin:.35rem 0 0; opacity:.8'>{subtitle}</p>",
+            f"<p style='margin:.35rem 0 0;opacity:.8'>{subtitle}</p>",
             unsafe_allow_html=True
         )
     st.divider()
