@@ -2,19 +2,19 @@
 from pathlib import Path
 import streamlit as st
 
-# ==== ONE PLACE TO TUNE SIZES/COLORS ====
-SIDEBAR_FILL = True              # True = fill sidebar width
+# === tweak sizes/colors here ===
+SIDEBAR_FILL = True              # fill sidebar width with the logo
 SIDEBAR_LOGO_WIDTH = 260         # used only if SIDEBAR_FILL is False
-HEADER_LOGO_WIDTH  = 140         # big logo in page header (px)
-ACCENT = "#0B3C5D"               # brand blue (must match config.toml)
+HEADER_LOGO_WIDTH  = 140         # header logo size (px)
+ACCENT = "#0B3C5D"               # brand blue (match config.toml)
 TEXT_MUTED = "rgba(230,238,246,.75)"
-# =======================================
+# ===============================
 
 def _find_logo() -> str | None:
     here = Path(__file__).resolve().parent
     for p in (
         Path("smarthaul-logo.png"),            # repo root (recommended)
-        here / "smarthaul-logo.png",           # next to branding.py
+        here / "smarthaul-logo.png",           # alongside branding.py
         here / "pages" / "smarthaul-logo.png", # inside /pages
     ):
         if p.exists():
@@ -23,8 +23,11 @@ def _find_logo() -> str | None:
 
 LOGO = _find_logo()
 
-def setup_branding(page_title: str, subtitle: str):
-    """Set page config, paint sidebar logo, and render a large header."""
+def setup_branding(page_title: str):
+    """
+    Set page config, paint sidebar logo, and render a large header with NO subtitle.
+    Call this first in every page.
+    """
     st.set_page_config(page_title=page_title, page_icon=(LOGO or "🚚"), layout="wide")
 
     # Sidebar branding
@@ -34,27 +37,20 @@ def setup_branding(page_title: str, subtitle: str):
         else:
             st.sidebar.image(LOGO, width=SIDEBAR_LOGO_WIDTH)
 
-    # Global CSS (cards, headings, metrics, buttons)
+    # Global CSS (spacing, headings, buttons)
     st.markdown(f"""
     <style>
-      /* tighten default paddings */
       .block-container {{ padding-top: 1.0rem; }}
 
-      /* page title section tweaks */
       .sh-title {{ display:flex; gap:1rem; align-items:center; }}
       .sh-subtitle {{ margin:.25rem 0 0; color:{TEXT_MUTED}; }}
 
-      /* buttons */
       .stButton>button {{
         border-radius: 10px;
         border: 1px solid rgba(255,255,255,.06);
         background: linear-gradient(180deg, {ACCENT} 0%, #08283F 100%);
       }}
 
-      /* dataframes */
-      .stDataFrame div[data-testid="stHorizontalBlock"] {{ gap: .5rem; }}
-
-      /* section divider */
       hr.sh-divider {{
         border: 0; height: 1px;
         background: linear-gradient(90deg, transparent, rgba(255,255,255,.12), transparent);
@@ -63,7 +59,7 @@ def setup_branding(page_title: str, subtitle: str):
     </style>
     """, unsafe_allow_html=True)
 
-    # Header
+    # Header (no subtitle)
     col1, col2 = st.columns([0.18, 0.82])
     with col1:
         if LOGO:
@@ -71,24 +67,11 @@ def setup_branding(page_title: str, subtitle: str):
         else:
             st.write("🚚")
     with col2:
-        st.markdown(
-            f"""
-            <div class="sh-title">
-              <div>
-                <h1 style="margin:0">SmartHaul</h1>
-                <p class="sh-subtitle">{subtitle}</p>
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.markdown('<h1 style="margin:0">SmartHaul</h1>', unsafe_allow_html=True)
+
     st.markdown('<hr class="sh-divider"/>', unsafe_allow_html=True)
 
-def section(title: str, anchor: str | None = None):
-    """Nice section header."""
-    a = f' id="{anchor}"' if anchor else ""
-    st.markdown(
-        f'<h2{a} style="margin:.25rem 0 .35rem 0;">{title}</h2>'
-        f'<p class="sh-subtitle"> </p>',
-        unsafe_allow_html=True,
-    )
+def section(title: str):
+    """Nice section header for within-page sections."""
+    st.markdown(f'<h2 style="margin:.25rem 0 .35rem 0;">{title}</h2>',
+                unsafe_allow_html=True)
