@@ -1,12 +1,42 @@
-# --- SmartHaul branding ---
-import streamlit as st
+# --- SmartHaul logo (auto-detect) ---
+import os, streamlit as st
 from pathlib import Path
-LOGO = "smarthaul-logo.png"  # change to "pages/smarthaul-logo.png" if logo is inside /pages
-st.set_page_config(page_title="SmartHaul – Upload Orders", page_icon=LOGO, layout="wide")
-if Path(LOGO).exists():
+
+def _find_logo() -> str | None:
+    here = Path(__file__).resolve().parent
+    # common spots (root, pages/)
+    candidates = [
+        Path("smarthaul-logo.png"),
+        here / "smarthaul-logo.png",
+        here.parent / "smarthaul-logo.png",
+        Path("pages/smarthaul-logo.png"),
+        here / "pages" / "smarthaul-logo.png",
+        here.parent / "pages" / "smarthaul-logo.png",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    # last resort: search repo for anything like *smart*haul*.png
+    for root in {Path("."), here, here.parent}:
+        hits = list(root.rglob("*smart*haul*.png"))
+        if hits:
+            return str(hits[0])
+    return None
+
+LOGO = _find_logo()
+st.set_page_config(page_title="SmartHaul", page_icon=(LOGO or "🚚"), layout="wide")
+if LOGO:
     st.sidebar.image(LOGO, use_column_width=True)
-st.markdown("<h1 style='margin:0'>SmartHaul</h1><p>Upload Orders</p><hr>", unsafe_allow_html=True)
-# --- end branding ---
+
+# quick diagnostics (collapse when you’re done)
+with st.expander("Branding debug", expanded=False):
+    st.write("Working dir:", os.getcwd())
+    st.write("This file:", str(Path(__file__).resolve()))
+    st.write("Logo found:", bool(LOGO), LOGO or "—")
+    if LOGO:
+        st.image(LOGO, caption="Inline check (should show the logo)")
+# -------------------------------------
+
 
 import pandas as pd
 import streamlit as st
