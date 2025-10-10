@@ -1,41 +1,13 @@
-# --- SmartHaul branding (compact) ---
+# --- SmartHaul branding ---
 import streamlit as st
 from pathlib import Path
-
-def _find_logo() -> str | None:
-    here = Path(__file__).resolve().parent
-    for p in (
-        Path("smarthaul-logo.png"),                 # repo root (recommended)
-        here / "smarthaul-logo.png",                # same folder as page
-        here.parent / "smarthaul-logo.png",         # repo root when in /pages
-        Path("pages/smarthaul-logo.png"),           # inside /pages
-    ):
-        if p.exists():
-            return str(p)
-    return None
-
-LOGO = _find_logo()
-st.set_page_config(
-    page_title="SmartHaul",
-    page_icon=(LOGO or "🚚"),
-    layout="wide",
-)
-
-# Sidebar logo: small & fixed width (no large stretching)
-if LOGO:
-    st.sidebar.image(LOGO, width=120)  # <= adjust smaller/bigger if you like
-
-def smarthaul_header(subtitle: str = ""):
-    left, right = st.columns([0.1, 0.9])
-    with left:
-        if LOGO:
-            st.image(LOGO, width=36)   # <= tiny header logo
-        else:
-            st.write("🚚")
-    with right:
+LOGO = "smarthaul-logo.png"  # change to "pages/smarthaul-logo.png" if logo is inside /pages
+st.set_page_config(page_title="SmartHaul – Upload Orders", page_icon=LOGO, layout="wide")
+if Path(LOGO).exists():
+    st.sidebar.image(LOGO, use_column_width=True)
+st.markdown("<h1 style='margin:0'>SmartHaul</h1><p>Upload Orders</p><hr>", unsafe_allow_html=True)
+# --- end branding ---
        
-
-
 import pandas as pd
 import streamlit as st
 
