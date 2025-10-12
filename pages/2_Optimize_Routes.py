@@ -1,6 +1,5 @@
 # pages/2_Optimize_Routes.py
 import math
-from datetime import timedelta
 from typing import List, Tuple
 
 import numpy as np
@@ -17,7 +16,8 @@ if "orders_df" not in st.session_state or st.session_state["orders_df"] is None:
     st.stop()
 
 orders = st.session_state["orders_df"].reset_index(drop=True)
-# Expected columns: order_id, lat, lon, service_time_min, tw_start_min, tw_end_min
+# Expected columns from Upload page:
+#   order_id, lat, lon, service_time_min, tw_start_min, tw_end_min
 
 # ---------- Helpers ----------
 def min_to_hhmm(m: int) -> str:
@@ -167,6 +167,7 @@ st.session_state["settings"] = dict(
 # ---------- Results ----------
 st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 st.markdown("### Planned routes")
+
 df_show = df_plan.copy()
 df_show["Stop #"] = df_show.groupby("vehicle_id").cumcount() + 1
 df_show["Time window"] = df_show["tw_start"].astype(str) + " – " + df_show["tw_end"].astype(str)
@@ -174,12 +175,15 @@ df_show["Lat"] = pd.to_numeric(df_show["lat"], errors="coerce").round(4)
 df_show["Lon"] = pd.to_numeric(df_show["lon"], errors="coerce").round(4)
 
 hide_coords = st.checkbox("Hide coordinates", value=True)
-cols = ["vehicle_id", "Stop #", "order_id", "eta", "Time window", "alert"]
+
+# Rename FIRST, then select using the NEW names (prevents KeyError)
+display_df = df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})
+display_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "alert"]
 if not hide_coords:
-    cols += ["Lat", "Lon"]
+    display_cols += ["Lat", "Lon"]
 
 st.dataframe(
-    df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})[cols],
+    display_df[display_cols],
     use_container_width=True,
     hide_index=True,
 )
@@ -190,27 +194,27 @@ st.markdown("### Route summary")
 
 def first_eta(series):
     for v in series:
-        if v != "—" and v != "N/A":
+        if v not in ("—", "N/A"):
             return v
     return "—"
 
 def last_eta(series):
     ser = list(series)
     for v in reversed(ser):
-        if v != "—" and v != "N/A":
+        if v not in ("—", "N/A"):
             return v
     return "—"
 
 summary = (
-    df_show.sort_values(["vehicle_id", "Stop #"], kind="mergesort")
-           .groupby("vehicle_id", sort=False)
-           .agg(Stops=("order_id", "count"),
-                **{"First ETA": ("eta", first_eta)},
-                **{"Last ETA": ("eta", last_eta)},
-                Alerts=("alert", lambda s: int((s != "").sum())))
-           .reset_index()
-           .rename(columns={"vehicle_id": "Vehicle"})
+    display_df.sort_values(["Vehicle", "Stop #"], kind="mergesort")
+              .groupby("Vehicle", sort=False)
+              .agg(Stops=("Order", "count"),
+                   **{"First ETA": ("ETA", first_eta)},
+                   **{"Last ETA": ("ETA", last_eta)},
+                   Alerts=("alert", lambda s: int((s != "").sum())))
+              .reset_index()
 )
+
 st.dataframe(summary, hide_index=True, use_container_width=True)
 
 # Optional map (only if pydeck available)
@@ -221,36 +225,36 @@ if st.checkbox("Show map (pydeck)", value=False):
         import numpy as np
         import pydeck as pdk
 
-        df_map = df_show.copy()
-        df_map["stop_idx"] = df_map.groupby("vehicle_id").cumcount() + 1
-        df_map = df_map.sort_values(["vehicle_id","stop_idx"], kind="mergesort").reset_index(drop=True)
+        df_map = display_df.copy()
+        df_map["stop_idx"] = df_map.groupby("Vehicle").cumcount() + 1
+        df_map = df_map.sort_values(["Vehicle","stop_idx"], kind="mergesort").reset_index(drop=True)
 
         palette = np.array([[0,122,255],[255,45,85],[88,86,214],[255,149,0],
                             [52,199,89],[175,82,222],[255,59,48],[90,200,250]])
-        veh_ids = df_map["vehicle_id"].unique()
+        veh_ids = df_map["Vehicle"].unique()
         cmap = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
-        df_map["color"] = df_map["vehicle_id"].map(cmap)
+        df_map["color"] = df_map["Vehicle"].map(cmap)
 
         rows = []
-        for v, g in df_map.groupby("vehicle_id", sort=False):
+        for v, g in df_map.groupby("Vehicle", sort=False):
             g = g.sort_values("stop_idx")
-            pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
-            rows.append({"vehicle_id": v, "path": pts, "color": cmap[v]})
+            pts = [{"lon": float(r.Lon), "lat": float(r.Lat)} for r in g.itertuples(index=False)]
+            rows.append({"Vehicle": v, "path": pts, "color": cmap[v]})
         paths = pd.DataFrame(rows)
 
         layers = [
             pdk.Layer("PathLayer", data=paths, get_path="path", get_width=4,
                       get_color="color", width_min_pixels=2, pickable=False),
-            pdk.Layer("ScatterplotLayer", data=df_map, get_position='[lon, lat]',
+            pdk.Layer("ScatterplotLayer", data=df_map, get_position='[Lon, Lat]',
                       get_radius=60, get_fill_color="color", get_line_color=[255,255,255],
                       line_width_min_pixels=1, pickable=True),
-            pdk.Layer("TextLayer", data=df_map, get_position='[lon, lat]',
+            pdk.Layer("TextLayer", data=df_map, get_position='[Lon, Lat]',
                       get_text="stop_idx", get_size=12, get_color=[230,230,230],
                       get_alignment_baseline="'center'")
         ]
-        view = pdk.ViewState(latitude=float(df_map.lat.mean()),
-                             longitude=float(df_map.lon.mean()), zoom=11)
-        tooltip = {"text": "Stop {stop_idx}\n{vehicle_id}\nETA {eta}"}
+        view = pdk.ViewState(latitude=float(df_map.Lat.mean()),
+                             longitude=float(df_map.Lon.mean()), zoom=11)
+        tooltip = {"text": "Stop {stop_idx}\n{Vehicle}\nETA {ETA}"}
         st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip))
     except Exception as e:
         st.info(f"Map skipped: {e}")
