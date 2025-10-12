@@ -1,181 +1,264 @@
+# pages/2_Optimize_Routes.py
+import math
+from datetime import timedelta
+from typing import List, Tuple
 
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-# ---------- helpers ----------
-def haversine_km(a: float, b: float, c: float, d: float) -> float:
+st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
+st.title("Optimize Routes")
+
+# ---------- Guards ----------
+if "orders_df" not in st.session_state or st.session_state["orders_df"] is None:
+    st.warning("No orders loaded. Go to **Upload Orders** first.")
+    st.page_link("pages/1_Upload_Orders.py", label="← Open Upload Orders", icon="⬅️")
+    st.stop()
+
+orders = st.session_state["orders_df"].reset_index(drop=True)
+# Expected columns: order_id, lat, lon, service_time_min, tw_start_min, tw_end_min
+
+# ---------- Helpers ----------
+def min_to_hhmm(m: int) -> str:
+    m = int(m) % (24 * 60)
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+def hhmm_to_min(s: str) -> int:
+    try:
+        h, m = [int(x) for x in s.split(":")]
+        return h * 60 + m
+    except Exception:
+        return 8 * 60  # default 08:00
+
+def haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     R = 6371.0088
-    p1, p2 = math.radians(a), math.radians(c)
-    dphi = math.radians(c - a)
-    dlmb = math.radians(d - b)
-    x = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
-    return 2 * R * math.asin(math.sqrt(x))
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    x = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    return 2 * R * math.asin(min(1, math.sqrt(x)))
 
-def travel_min(a, b, c, d, speed: float = 25.0) -> float:
-    return (haversine_km(a, b, c, d) / max(speed, 5)) * 60.0
+@st.cache_data(show_spinner=False)
+def distance_matrix(points: List[Tuple[float,float]]) -> np.ndarray:
+    n = len(points)
+    M = np.zeros((n, n), dtype=float)
+    for i in range(n):
+        for j in range(i + 1, n):
+            km = haversine_km(points[i], points[j])
+            M[i, j] = M[j, i] = km
+    return M
 
-def t(s: str) -> datetime:
-    return datetime.strptime(str(s), "%H:%M")
+# ---------- Parameters ----------
+st.sidebar.header("Planner Settings")
+speed_kph = st.sidebar.slider("Avg speed (km/h)", 15, 90, 30, 5)
+max_stops_per_vehicle = st.sidebar.slider("Max stops per route", 3, 50, 15, 1)
+num_vehicles = st.sidebar.slider("Vehicles", 1, 50, 5, 1)
+shift_start = st.sidebar.text_input("Shift start (HH:MM)", "08:00")
 
-# ---------- greedy planner ----------
-def greedy(df: pd.DataFrame, depot=(14.5995, 120.9842), speed: float = 25.0, max_stops: int = 10) -> pd.DataFrame:
-    orders = df.copy().reset_index(drop=True)
-    orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
-    orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
-    orders["service_min"] = pd.to_numeric(orders.get("service_min", 0), errors="coerce").fillna(0)
-    orders["tw_start"] = orders["tw_start"].astype(str)
-    orders["tw_end"]   = orders["tw_end"].astype(str)
-    orders["done"] = False
+# ---------- Build depot + distance matrix ----------
+# Use centroid as a simple depot for now
+depot = (float(orders["lat"].mean()), float(orders["lon"].mean()))
+points = [depot] + list(zip(orders["lat"].tolist(), orders["lon"].tolist()))
+D_km = distance_matrix(points)  # includes depot at index 0
 
-    routes, vid = [], 1
-    while not orders.done.all():
-        lat, lon = depot
-        now = t("08:00")
-        route = []
+# ---------- Greedy planner (nearest neighbor with stop cap) ----------
+def plan_routes(D: np.ndarray, num_veh: int, max_stops: int) -> List[List[int]]:
+    """
+    Returns list of routes as sequences of node indices (0 = depot).
+    Orders are nodes 1..N.
+    """
+    n = D.shape[0] - 1
+    unassigned = set(range(1, n + 1))
+    routes = []
 
-        while True:
-            cand = []
-            for i, row in orders[~orders.done].iterrows():
-                if pd.isna(row.lat) or pd.isna(row.lon):
-                    continue
-                drive = travel_min(lat, lon, row.lat, row.lon, speed)
-                arr = now + timedelta(minutes=drive)
-                start = max(arr, t(row.tw_start))
-                if start <= t(row.tw_end):
-                    cand.append((i, drive, start))
+    # initial pass: build up to num_veh routes
+    for _ in range(num_veh):
+        if not unassigned:
+            routes.append([0, 0])
+            continue
+        route = [0]
+        current = 0
+        while unassigned and (len(route) - 1) < max_stops:
+            nxt = min(unassigned, key=lambda j: D[current, j])
+            unassigned.remove(nxt)
+            route.append(nxt)
+            current = nxt
+        route.append(0)
+        routes.append(route)
 
-            if not cand or len(route) >= max_stops:
-                break
+    # round-robin add remaining to existing routes (still naive)
+    r = 0
+    while unassigned:
+        nxt = min(unassigned, key=lambda j: D[routes[r][-2], j])
+        unassigned.remove(nxt)
+        routes[r].insert(-1, nxt)
+        r = (r + 1) % len(routes)
 
-            i, drive, start = sorted(cand, key=lambda x: x[1])[0]
-            r = orders.loc[i]
-            svc_min = float(r.service_min) if pd.notna(r.service_min) else 0.0
-            leave = start + timedelta(minutes=svc_min)
+    return routes
 
-            route.append(dict(
-                vehicle_id=f"V{vid}",
-                order_id=r.order_id,
-                lat=r.lat, lon=r.lon,
-                eta=start.strftime("%H:%M"),
-                tw_start=r.tw_start, tw_end=r.tw_end
+routes_idx = plan_routes(D_km, num_vehicles, max_stops_per_vehicle)
+
+# ---------- Build route plan with ETAs and window checks ----------
+v_speed_km_min = max(speed_kph, 5) / 60.0  # avoid zero
+time_now = hhmm_to_min(shift_start)
+
+rows = []
+for v, route in enumerate(routes_idx, start=1):
+    tmin = time_now
+    for i in range(len(route) - 1):
+        a, b = route[i], route[i+1]
+        leg_km = D_km[a, b]
+        drive_min = int(round(leg_km / v_speed_km_min)) if v_speed_km_min > 0 else 0
+        tmin += drive_min
+
+        # If arriving at an order node
+        if b != 0:
+            ord_row = orders.iloc[b - 1]
+            tw_s = int(ord_row["tw_start_min"]) if pd.notna(ord_row["tw_start_min"]) else None
+            tw_e = int(ord_row["tw_end_min"]) if pd.notna(ord_row["tw_end_min"]) else None
+            svc = int(ord_row["service_time_min"]) if pd.notna(ord_row["service_time_min"]) else 0
+
+            # Respect start of window (wait if early)
+            if tw_s is not None and tmin < tw_s:
+                tmin = tw_s
+
+            eta_hhmm = min_to_hhmm(tmin)
+            within_window = True
+            if tw_e is not None and tmin > tw_e:
+                within_window = False
+
+            rows.append(dict(
+                vehicle_id=f"V{v}",
+                order_id=str(ord_row["order_id"]),
+                lat=float(ord_row["lat"]),
+                lon=float(ord_row["lon"]),
+                eta=eta_hhmm,
+                tw_start=min_to_hhmm(tw_s) if tw_s is not None else "—",
+                tw_end=min_to_hhmm(tw_e) if tw_e is not None else "—",
+                within_window=within_window,
+                leg_km=round(leg_km, 2),
             ))
-            orders.at[i, "done"] = True
-            lat, lon, now = r.lat, r.lon, leave
 
-        if route:
-            routes.append(pd.DataFrame(route)); vid += 1
-        else:
-            i = orders[~orders.done].index[0]; r = orders.loc[i]
-            routes.append(pd.DataFrame([dict(
-                vehicle_id=f"V{vid}", order_id=r.order_id, lat=r.lat, lon=r.lon,
-                eta="N/A", tw_start=r.tw_start, tw_end=r.tw_end
-            )]))
-            orders.at[i, "done"] = True; vid += 1
+            # add service time
+            tmin += svc
 
-    return pd.concat(routes, ignore_index=True)
+df_plan = pd.DataFrame(rows)
+if df_plan.empty:
+    st.warning("No routes could be constructed. Check your data.")
+    st.stop()
 
-# ---------- require data ----------
-if "orders_df" not in st.session_state:
-    st.warning("Upload orders first on the Upload page."); st.stop()
+# Alerts + state
+df_plan["alert"] = df_plan.apply(
+    lambda r: "" if (r["within_window"] in (True, "—")) else "Late risk",
+    axis=1,
+)
+df_plan["status"] = "Planned"
 
-speed = st.slider("Average speed (km/h)", 15, 45, 25, 1)
-maxst = st.slider("Max stops per route", 5, 20, 10, 1)
+# Persist for other pages
+st.session_state["routes_df"] = df_plan.copy()
+st.session_state["settings"] = dict(
+    speed_kph=float(speed_kph),
+    max_stops_per_vehicle=int(max_stops_per_vehicle),
+    num_vehicles=int(num_vehicles),
+    shift_start=shift_start,
+)
 
-# ---------- compute ----------
-if st.button("Compute routes"):
-    df_plan = greedy(st.session_state["orders_df"], speed=speed, max_stops=maxst)
-    df_plan["alert"] = df_plan.apply(
-        lambda r: "Late risk" if r["eta"] != "N/A" and r["eta"] > r["tw_end"] else "",
-        axis=1,
-    )
-    df_plan["status"] = "Planned"
-    st.session_state["routes_df"] = df_plan
-    st.session_state["dispatch_df"] = df_plan.copy()
-    st.success(f"Computed {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
+# ---------- Results ----------
+st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
+st.markdown("### Planned routes")
+df_show = df_plan.copy()
+df_show["Stop #"] = df_show.groupby("vehicle_id").cumcount() + 1
+df_show["Time window"] = df_show["tw_start"].astype(str) + " – " + df_show["tw_end"].astype(str)
+df_show["Lat"] = pd.to_numeric(df_show["lat"], errors="coerce").round(4)
+df_show["Lon"] = pd.to_numeric(df_show["lon"], errors="coerce").round(4)
 
-# ---------- results ----------
-if "routes_df" in st.session_state:
-    df = st.session_state["routes_df"].copy()
+hide_coords = st.checkbox("Hide coordinates", value=True)
+cols = ["vehicle_id", "Stop #", "order_id", "eta", "Time window", "alert"]
+if not hide_coords:
+    cols += ["Lat", "Lon"]
 
-    section("Planned routes")
-    df["Stop #"] = df.groupby("vehicle_id").cumcount() + 1
-    df["Time window"] = df["tw_start"].astype(str) + " – " + df["tw_end"].astype(str)
-    df["Lat"] = pd.to_numeric(df["lat"], errors="coerce").round(4)
-    df["Lon"] = pd.to_numeric(df["lon"], errors="coerce").round(4)
+st.dataframe(
+    df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})[cols],
+    use_container_width=True,
+    hide_index=True,
+)
 
-    display_df = df.rename(columns={
-        "vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA", "alert": "Alert"
-    })
+# Summary
+st.divider()
+st.markdown("### Route summary")
 
-    hide_coords = st.checkbox("Hide coordinates", value=True)
+def first_eta(series):
+    for v in series:
+        if v != "—" and v != "N/A":
+            return v
+    return "—"
 
-    cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "Alert"]
-    if not hide_coords:
-        cols += ["Lat", "Lon"]
+def last_eta(series):
+    ser = list(series)
+    for v in reversed(ser):
+        if v != "—" and v != "N/A":
+            return v
+    return "—"
 
-    st.dataframe(display_df[[c for c in cols if c in display_df.columns]],
-                 use_container_width=True, hide_index=True)
+summary = (
+    df_show.sort_values(["vehicle_id", "Stop #"], kind="mergesort")
+           .groupby("vehicle_id", sort=False)
+           .agg(Stops=("order_id", "count"),
+                **{"First ETA": ("eta", first_eta)},
+                **{"Last ETA": ("eta", last_eta)},
+                Alerts=("alert", lambda s: int((s != "").sum())))
+           .reset_index()
+           .rename(columns={"vehicle_id": "Vehicle"})
+)
+st.dataframe(summary, hide_index=True, use_container_width=True)
 
-    st.divider()
-    section("Route summary")
-    def first_valid_eta(s):
-        for v in s:
-            if v != "N/A": return v
-        return "—"
-    def last_valid_eta(s):
-        lst = list(s)
-        for v in reversed(lst):
-            if v != "N/A": return v
-        return "—"
+# Optional map (only if pydeck available)
+st.divider()
+st.markdown("### Map")
+if st.checkbox("Show map (pydeck)", value=False):
+    try:
+        import numpy as np
+        import pydeck as pdk
 
-    summary = (
-        df.sort_values(["vehicle_id","eta"], kind="mergesort")
-          .groupby("vehicle_id", sort=False)
-          .agg(Stops=("order_id","count"),
-               **{"First ETA":("eta", first_valid_eta)},
-               **{"Last ETA":("eta", last_valid_eta)},
-               Alerts=("alert", lambda s: int((s!="").sum())))
-          .reset_index().rename(columns={"vehicle_id":"Vehicle"})
-    )
-    st.dataframe(summary, hide_index=True, use_container_width=True)
+        df_map = df_show.copy()
+        df_map["stop_idx"] = df_map.groupby("vehicle_id").cumcount() + 1
+        df_map = df_map.sort_values(["vehicle_id","stop_idx"], kind="mergesort").reset_index(drop=True)
 
-    st.divider()
-    section("Map")
-    if st.checkbox("Show map", value=True):
-        try:
-            import pydeck as pdk, numpy as np
-            df_map = df.copy()
-            df_map["stop_idx"] = df_map.groupby("vehicle_id").cumcount() + 1
-            df_map = df_map.sort_values(["vehicle_id","stop_idx"], kind="mergesort").reset_index(drop=True)
+        palette = np.array([[0,122,255],[255,45,85],[88,86,214],[255,149,0],
+                            [52,199,89],[175,82,222],[255,59,48],[90,200,250]])
+        veh_ids = df_map["vehicle_id"].unique()
+        cmap = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
+        df_map["color"] = df_map["vehicle_id"].map(cmap)
 
-            palette = np.array([[0,122,255],[255,45,85],[88,86,214],[255,149,0],
-                                [52,199,89],[175,82,222],[255,59,48],[90,200,250]])
-            veh_ids = df_map["vehicle_id"].unique()
-            cmap = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
-            df_map["color"] = df_map["vehicle_id"].map(cmap)
+        rows = []
+        for v, g in df_map.groupby("vehicle_id", sort=False):
+            g = g.sort_values("stop_idx")
+            pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
+            rows.append({"vehicle_id": v, "path": pts, "color": cmap[v]})
+        paths = pd.DataFrame(rows)
 
-            rows = []
-            for v, g in df_map.groupby("vehicle_id", sort=False):
-                g = g.sort_values("stop_idx")
-                pts = [{"lon": float(r.lon), "lat": float(r.lat)} for r in g.itertuples(index=False)]
-                rows.append({"vehicle_id": v, "path": pts, "color": cmap[v]})
-            paths = pd.DataFrame(rows)
+        layers = [
+            pdk.Layer("PathLayer", data=paths, get_path="path", get_width=4,
+                      get_color="color", width_min_pixels=2, pickable=False),
+            pdk.Layer("ScatterplotLayer", data=df_map, get_position='[lon, lat]',
+                      get_radius=60, get_fill_color="color", get_line_color=[255,255,255],
+                      line_width_min_pixels=1, pickable=True),
+            pdk.Layer("TextLayer", data=df_map, get_position='[lon, lat]',
+                      get_text="stop_idx", get_size=12, get_color=[230,230,230],
+                      get_alignment_baseline="'center'")
+        ]
+        view = pdk.ViewState(latitude=float(df_map.lat.mean()),
+                             longitude=float(df_map.lon.mean()), zoom=11)
+        tooltip = {"text": "Stop {stop_idx}\n{vehicle_id}\nETA {eta}"}
+        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip))
+    except Exception as e:
+        st.info(f"Map skipped: {e}")
 
-            layers = [
-                pdk.Layer("PathLayer", data=paths, get_path="path", get_width=4,
-                          get_color="color", width_min_pixels=2, pickable=False),
-                pdk.Layer("ScatterplotLayer", data=df_map, get_position='[lon, lat]',
-                          get_radius=60, get_fill_color="color", get_line_color=[255,255,255],
-                          line_width_min_pixels=1, pickable=True),
-                pdk.Layer("TextLayer", data=df_map, get_position='[lon, lat]',
-                          get_text="stop_idx", get_size=12, get_color=[230,230,230],
-                          get_alignment_baseline="'center'")
-            ]
-            view = pdk.ViewState(latitude=float(df_map.lat.mean()),
-                                 longitude=float(df_map.lon.mean()), zoom=11)
-            tooltip = {"text": "Stop {stop_idx}\nVehicle {vehicle_id}\nETA {eta}"}
-            st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip=tooltip))
-        except Exception as e:
-            st.info(f"Map rendering skipped: {e}")
-
-    st.download_button("Download planned routes (CSV)",
-                       data=df.to_csv(index=False).encode("utf-8"),
-                       file_name="routes_plan.csv", mime="text/csv")
+# Download
+st.download_button(
+    "Download planned routes (CSV)",
+    data=df_plan.to_csv(index=False).encode("utf-8"),
+    file_name="routes_plan.csv",
+    mime="text/csv",
+)
