@@ -1,12 +1,4 @@
-from branding import setup_branding, section
-setup_branding("SmartHaul – Optimize Routes")
 
-import streamlit as st
-import pandas as pd
-from datetime import datetime, timedelta
-import math
-
-section("Optimize Routes")
 
 # ---------- helpers ----------
 def haversine_km(a: float, b: float, c: float, d: float) -> float:
