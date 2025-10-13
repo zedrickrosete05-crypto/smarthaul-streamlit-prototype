@@ -24,6 +24,7 @@ orders = st.session_state["orders_df"].reset_index(drop=True)
 
 # ---------------- Helpers ----------------
 def to_ampm(minutes: int | float | None) -> str:
+    """Minutes after midnight -> 'h:MM AM/PM'. Returns '—' if None/NaN."""
     if minutes is None or pd.isna(minutes):
         return "—"
     m = int(minutes) % (24 * 60)
@@ -34,10 +35,6 @@ def to_ampm(minutes: int | float | None) -> str:
         h12 = 12
     return f"{h12}:{mm:02d} {suffix}"
 
-def time_to_minutes(t: dt.time | None) -> int | None:
-    if t is None: return None
-    return t.hour * 60 + t.minute
-
 def hhmm_to_min(s: str | int | float | None) -> int | None:
     if s is None or (isinstance(s, float) and pd.isna(s)): return None
     s = str(s).strip()
@@ -47,6 +44,9 @@ def hhmm_to_min(s: str | int | float | None) -> int | None:
         return h * 60 + m
     except Exception:
         return None
+
+def time_to_minutes(t: dt.time | None) -> int | None:
+    return None if t is None else t.hour * 60 + t.minute
 
 def haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     R = 6371.0088
@@ -84,24 +84,23 @@ orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
 orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
 orders["service_time_min"] = pd.to_numeric(orders["service_time_min"], errors="coerce").fillna(0).astype(int)
 
-# ---------------- Sidebar: Planner Settings (fully wired) ----------------
+# ---------------- Sidebar: Planner Settings ----------------
 with st.sidebar:
     st.header("Planner Settings")
-
-    speed_kph = st.slider("Avg speed (km/h)", 15, 90, 40, 5)
-    max_stops_per_vehicle = st.slider("Max stops per route", 3, 50, 28, 1)
-    num_vehicles = st.slider("Vehicles", 1, 50, 16, 1)
+    speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5)
+    max_stops_per_vehicle = st.slider("Max stops per route", 3, 50, 15, 1)
+    num_vehicles = st.slider("Vehicles", 1, 50, 5, 1)
 
     st.subheader("Shift start (Asia/Manila)")
-    use_now = st.toggle("Use current local time", value=False)
-    now_local = dt.datetime.now(PH_TZ)
-    default_time = now_local.time().replace(second=0, microsecond=0)
-    shift_time = default_time if use_now else st.time_input("Pick time", value=dt.time(8, 0), step=dt.timedelta(minutes=5))
+    use_now = st.toggle("Use current local time", value=True)
+    now_local = dt.datetime.now(PH_TZ).time().replace(second=0, microsecond=0)
+    shift_time = now_local if use_now else st.time_input("Pick time", value=dt.time(8, 0), step=dt.timedelta(minutes=5))
     shift_start_min = time_to_minutes(shift_time) or 8 * 60
 
     st.subheader("Realtime")
-    auto_refresh = st.toggle("Auto-refresh", value=False, help="Updates ETAs as time moves (query-param tick).")
-    refresh_sec = st.slider("Refresh every (seconds)", 15, 120, 60, 5, disabled=not auto_refresh)
+    auto_refresh = st.toggle("Auto-refresh", value=True, help="Reruns the page at an interval so ETAs move in real time.")
+    refresh_sec = st.slider("Refresh every (seconds)", 10, 120, 30, 5, disabled=not auto_refresh)
+    # True auto-refresh without extra packages: change a query param every N seconds
     if auto_refresh:
         st.experimental_set_query_params(t=int(time.time() // refresh_sec))
 
@@ -110,7 +109,6 @@ with st.sidebar:
     depot = None
     if use_manual_depot:
         depot_place = st.text_input("Depot place", "Cebu IT Park")
-        # quick one-click geocode
         if st.button("Geocode depot"):
             try:
                 import urllib.parse, urllib.request, json
@@ -134,7 +132,7 @@ if depot is None:
 points = [depot] + list(zip(orders["lat"].tolist(), orders["lon"].tolist()))
 D_km = distance_matrix(points)  # depot at index 0
 
-# ---------------- Sweep + simple improvements ----------------
+# ---------------- Sweep clustering + 2-opt ----------------
 def polar_angle(p: Tuple[float, float], origin: Tuple[float, float]) -> float:
     y = p[0] - origin[0]
     x = (p[1] - origin[1]) * math.cos(math.radians(origin[0]))
@@ -188,7 +186,7 @@ def two_opt(route: List[int], D: np.ndarray) -> List[int]:
 
 # Build routes using current planner settings
 N = len(orders)
-V = max(1, min(int(num_vehicles), max(1, N)))         # cap vehicles sensibly
+V = max(1, min(int(num_vehicles), max(1, N)))
 cap = int(max_stops_per_vehicle)
 
 clusters = sweep_assign(V, cap)
@@ -199,7 +197,7 @@ for cl in clusters:
         r = two_opt(r, D_km)
     routes_idx.append(r)
 
-# Add leftover stops if any
+# Any leftovers (should be none if sweep respected cap, but keep it safe)
 assigned = set(j for cl in clusters for j in cl)
 if len(assigned) < N:
     leftovers = [j for j in range(1, N + 1) if j not in assigned]
@@ -215,8 +213,8 @@ if len(assigned) < N:
         if len(routes_idx[best_r]) > 4:
             routes_idx[best_r] = two_opt(routes_idx[best_r], D_km)
 
-# ---------------- Build plan (AM/PM everywhere) ----------------
-v_speed_km_min = max(float(speed_kph), 5.0) / 60.0
+# ---------------- Build plan (AM/PM + realtime) ----------------
+v_speed_km_min = max(float(speed_kph), 5.0) / 60.0  # km/min
 time_now_min = shift_start_min
 
 rows = []
@@ -310,7 +308,7 @@ def last_eta(series: pd.Series) -> str:
 def route_distance_km(route_idx: list[int]) -> float:
     return float(sum(D_km[route_idx[i], route_idx[i + 1]] for i in range(len(route_idx) - 1)))
 
-veh_routes = {f"V{i+1}": r for i, r in enumerate([r for r in routes_idx])}
+veh_routes = {f"V{i+1}": r for i, r in enumerate(routes_idx)}
 
 summary = (
     display_df.sort_values(["Vehicle", "Stop #"], kind="mergesort")
