@@ -1,7 +1,8 @@
 # pages/2_Optimize_Routes.py
 from __future__ import annotations
 
-import math
+import math, time, datetime as dt
+from zoneinfo import ZoneInfo
 from typing import List, Tuple
 
 import numpy as np
@@ -12,6 +13,8 @@ import streamlit as st
 st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
 st.title("Optimize Routes")
 
+PH_TZ = ZoneInfo("Asia/Manila")
+
 # ---------------- Guards ----------------
 if "orders_df" not in st.session_state or st.session_state["orders_df"] is None:
     st.warning("No orders loaded. Go to **Upload Orders** first.")
@@ -19,23 +22,28 @@ if "orders_df" not in st.session_state or st.session_state["orders_df"] is None:
     st.stop()
 
 orders = st.session_state["orders_df"].reset_index(drop=True)
-# Expected (best-case) columns from Upload page:
-#   order_id, lat, lon, service_time_min, tw_start_min, tw_end_min
-# But we also support: service_min, tw_start, tw_end (HH:MM) and convert here.
 
-# ---------------- Helpers ----------------
-def min_to_hhmm(m: int | float | None) -> str:
+# ---------------- Helpers (time & distance) ----------------
+def min_to_ampm(m: int | float | None) -> str:
+    """Minutes after midnight -> 'h:mma/p' (e.g., 8:05 AM)."""
     if m is None or pd.isna(m):
         return "—"
     m = int(m) % (24 * 60)
-    return f"{m // 60:02d}:{m % 60:02d}"
+    h24, minute = divmod(m, 60)
+    suffix = "AM" if h24 < 12 else "PM"
+    h12 = h24 % 12
+    if h12 == 0: h12 = 12
+    return f"{h12}:{minute:02d} {suffix}"
+
+def time_to_minutes(t: dt.time | None) -> int | None:
+    if t is None: return None
+    return t.hour * 60 + t.minute
 
 def hhmm_to_min(s: str | int | float | None) -> int | None:
-    if s is None or (isinstance(s, float) and pd.isna(s)):
-        return None
+    """Fallback parser for HH:MM strings if *_min not provided."""
+    if s is None or (isinstance(s, float) and pd.isna(s)): return None
     s = str(s).strip()
-    if not s or ":" not in s:
-        return None
+    if not s or ":" not in s: return None
     try:
         h, m = [int(x) for x in s.split(":")]
         return h * 60 + m
@@ -47,7 +55,7 @@ def haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     lat1, lon1 = math.radians(a[0]), math.radians(a[1])
     lat2, lon2 = math.radians(b[0]), math.radians(b[1])
     dlat, dlon = lat2 - lat1, lon2 - lon1
-    x = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    x = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
     return 2 * R * math.asin(min(1, math.sqrt(x)))
 
 @st.cache_data(show_spinner=False)
@@ -61,13 +69,10 @@ def distance_matrix(points: List[Tuple[float, float]]) -> np.ndarray:
     return M
 
 # ---------------- Normalize uploads ----------------
-# Accept both *_min and HH:MM string columns
 if "service_time_min" not in orders.columns and "service_min" in orders.columns:
     orders["service_time_min"] = pd.to_numeric(orders["service_min"], errors="coerce").fillna(0).astype(int)
-
 if "tw_start_min" not in orders.columns and "tw_start" in orders.columns:
     orders["tw_start_min"] = orders["tw_start"].map(hhmm_to_min)
-
 if "tw_end_min" not in orders.columns and "tw_end" in orders.columns:
     orders["tw_end_min"] = orders["tw_end"].map(hhmm_to_min)
 
@@ -77,18 +82,37 @@ if missing:
     st.error(f"Upload page didn't produce required columns: {missing}")
     st.stop()
 
-# Coerce numerics to be safe
 orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
 orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
 orders["service_time_min"] = pd.to_numeric(orders["service_time_min"], errors="coerce").fillna(0).astype(int)
 
-# ---------------- Sidebar parameters ----------------
+# ---------------- Sidebar: Planner Settings ----------------
 with st.sidebar:
     st.header("Planner Settings")
-    speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5)
+
+    speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5, help="Used for ETA from haversine distance.")
     max_stops_per_vehicle = st.slider("Max stops per route", 3, 50, 15, 1)
     num_vehicles = st.slider("Vehicles", 1, 50, 5, 1)
-    shift_start = st.text_input("Shift start (HH:MM)", "08:00")
+
+    # Realtime shift start
+    st.subheader("Shift time (Asia/Manila)")
+    use_now = st.toggle("Use current time", value=True)
+    now_local = dt.datetime.now(PH_TZ)
+    default_time = now_local.time().replace(second=0, microsecond=0)
+    shift_time = default_time if use_now else st.time_input("Shift start", value=default_time, step=dt.timedelta(minutes=5))
+    shift_start_min = time_to_minutes(shift_time) or 8 * 60
+
+    # Auto-refresh (optional, lightweight)
+    st.subheader("Realtime options")
+    auto_refresh = st.toggle("Auto-refresh page", value=False, help="Updates ETAs as time moves. Uses a URL param trick.")
+    interval = st.slider("Refresh every (seconds)", 15, 120, 60, 5, disabled=not auto_refresh)
+    if auto_refresh:
+        # Change a query param every interval seconds to trigger re-run
+        st.experimental_set_query_params(t=int(time.time() // interval))
+
+    st.header("Heuristics")
+    use_sweep = st.toggle("Use sweep clustering", value=True)
+    use_two_opt = st.toggle("Improve with 2-opt", value=True)
 
     st.header("Depot")
     use_manual_depot = st.checkbox("Use manual depot (place)", value=False)
@@ -96,90 +120,139 @@ with st.sidebar:
     if use_manual_depot:
         depot_place = st.text_input("Depot place", "Cebu IT Park")
         depot_coords = None
-        try:
-            # If you have utils/geocode.py with geocode_place() you can use it here.
-            from utils.geocode import geocode_place  # type: ignore
-            depot_coords = geocode_place(depot_place)
-        except Exception:
-            depot_coords = None
-        if depot_coords is None:
-            st.warning("Could not geocode depot place. Falling back to centroid.")
-        else:
+        # lightweight built-in geocoder (optional)
+        if st.button("Geocode depot"):
+            try:
+                import urllib.parse, urllib.request, json
+                url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(depot_place+', Philippines')}&format=json&limit=1"
+                req = urllib.request.Request(url, headers={"User-Agent": "SmartHaul/1.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+                if data:
+                    depot_coords = (float(data[0]["lat"]), float(data[0]["lon"]))
+                    st.success(f"Depot geocoded: {depot_coords[0]:.5f}, {depot_coords[1]:.5f}")
+            except Exception as e:
+                st.error(f"Depot geocode failed: {e}")
+        if depot_coords:
             depot = (float(depot_coords[0]), float(depot_coords[1]))
 
 # Fallback depot = centroid of orders
 if depot is None:
     depot = (float(orders["lat"].mean()), float(orders["lon"].mean()))
 
-# ---------------- Build distance matrix ----------------
+# ---------------- Distance matrix ----------------
 points = [depot] + list(zip(orders["lat"].tolist(), orders["lon"].tolist()))
-D_km = distance_matrix(points)  # includes depot at index 0
+D_km = distance_matrix(points)  # depot at index 0
 
-# ---------------- Greedy planner ----------------
-def plan_routes(D: np.ndarray, num_veh: int, max_stops: int) -> List[List[int]]:
-    """
-    Return routes as sequences of node indices (0 = depot).
-    Orders are nodes 1..N.
-    """
-    n = D.shape[0] - 1
-    unassigned = set(range(1, n + 1))
-    routes: List[List[int]] = []
+# ---------------- Sweep clustering ----------------
+def polar_angle(p: Tuple[float, float], origin: Tuple[float, float]) -> float:
+    y = p[0] - origin[0]
+    x = (p[1] - origin[1]) * math.cos(math.radians(origin[0]))
+    return math.degrees(math.atan2(y, x)) % 360.0
 
-    # Build up to num_veh initial routes
-    for _ in range(num_veh):
-        if not unassigned:
-            routes.append([0, 0])
-            continue
-        route = [0]
-        current = 0
-        while unassigned and (len(route) - 1) < max_stops:
-            nxt = min(unassigned, key=lambda j: D[current, j])
-            unassigned.remove(nxt)
-            route.append(nxt)
-            current = nxt
-        route.append(0)
-        routes.append(route)
+def sweep_assign(max_routes: int, cap_stops: int) -> List[List[int]]:
+    n = len(points) - 1
+    if n <= 0:
+        return [[] for _ in range(max_routes)]
+    nodes = list(range(1, n + 1))
+    angs = [(i, polar_angle(points[i], depot)) for i in nodes]
+    angs.sort(key=lambda t: t[1])
+    clusters: List[List[int]] = [[] for _ in range(max_routes)]
+    ridx = 0
+    for i, _a in angs:
+        start = ridx
+        while len(clusters[ridx]) >= cap_stops:
+            ridx = (ridx + 1) % max_routes
+            if ridx == start:
+                break
+        clusters[ridx].append(i)
+        if len(clusters[ridx]) >= cap_stops:
+            ridx = (ridx + 1) % max_routes
+    return clusters
 
-    # Round-robin add remaining stops
-    r = 0
-    while unassigned:
-        nxt = min(unassigned, key=lambda j: D[routes[r][-2], j])
-        unassigned.remove(nxt)
-        routes[r].insert(-1, nxt)
-        r = (r + 1) % len(routes)
+# ---------------- Route seeds & 2-opt ----------------
+def nearest_neighbor_route(cluster: List[int], D: np.ndarray) -> List[int]:
+    if not cluster: return [0, 0]
+    un = set(cluster)
+    route, cur = [0], 0
+    while un:
+        nxt = min(un, key=lambda j: D[cur, j])
+        un.remove(nxt); route.append(nxt); cur = nxt
+    route.append(0)
+    return route
 
-    return routes
+def route_len(route: List[int], D: np.ndarray) -> float:
+    return float(sum(D[route[i], route[i+1]] for i in range(len(route)-1)))
 
-routes_idx = plan_routes(D_km, int(num_vehicles), int(max_stops_per_vehicle))
+def two_opt(route: List[int], D: np.ndarray) -> List[int]:
+    best = route[:]; best_len = route_len(best, D); improved = True
+    while improved:
+        improved = False
+        for i in range(1, len(best) - 2):
+            for k in range(i + 1, len(best) - 1):
+                if k - i == 1: continue
+                new = best[:i] + best[i:k][::-1] + best[k:]
+                new_len = route_len(new, D)
+                if new_len + 1e-9 < best_len:
+                    best, best_len, improved = new, new_len, True
+    return best
 
-# ---------------- Build plan with ETAs & window checks ----------------
-v_speed_km_min = max(float(speed_kph), 5.0) / 60.0  # km/min (avoid zero)
-time_now = hhmm_to_min(shift_start) or 8 * 60
+# ---------------- Build routes ----------------
+N = len(orders)
+V = max(1, min(int(num_vehicles), max(1, N)))
+cap = int(max_stops_per_vehicle)
+
+clusters = sweep_assign(V, cap) if use_sweep else [[] for _ in range(V)]
+if not use_sweep:
+    i = 0
+    for node in range(1, N + 1):
+        clusters[i].append(node); i = (i + 1) % V
+
+routes_idx: List[List[int]] = []
+for cl in clusters:
+    r = nearest_neighbor_route(cl, D_km)
+    if use_two_opt and len(r) > 4:
+        r = two_opt(r, D_km)
+    routes_idx.append(r)
+
+# Assign any leftovers (if any)
+assigned = set(j for cl in clusters for j in cl)
+if len(assigned) < N:
+    leftovers = [j for j in range(1, N+1) if j not in assigned]
+    for j in leftovers:
+        best_r, best_pos, best_cost = None, None, float("inf")
+        for ri, r in enumerate(routes_idx):
+            for pos in range(1, len(r)):
+                cand = r[:pos] + [j] + r[pos:]
+                cost = route_len(cand, D_km)
+                if cost < best_cost:
+                    best_r, best_pos, best_cost = ri, pos, cost
+        routes_idx[best_r].insert(best_pos, j)
+        if use_two_opt and len(routes_idx[best_r]) > 4:
+            routes_idx[best_r] = two_opt(routes_idx[best_r], D_km)
+
+# ---------------- Build plan with ETAs (AM/PM) & window checks ----------------
+v_speed_km_min = max(float(speed_kph), 5.0) / 60.0  # km/min
+time_now_min = shift_start_min  # already minutes from time picker or 'now'
 
 rows = []
 for v, route in enumerate(routes_idx, start=1):
-    tmin = time_now
+    tmin = time_now_min
     for i in range(len(route) - 1):
         a, b = route[i], route[i + 1]
         leg_km = float(D_km[a, b])
         drive_min = int(round(leg_km / v_speed_km_min)) if v_speed_km_min > 0 else 0
         tmin += drive_min
 
-        # If arriving at an order node
         if b != 0:
             ord_row = orders.iloc[b - 1]
             tw_s = int(ord_row["tw_start_min"]) if pd.notna(ord_row["tw_start_min"]) else None
             tw_e = int(ord_row["tw_end_min"]) if pd.notna(ord_row["tw_end_min"]) else None
             svc = int(ord_row["service_time_min"]) if pd.notna(ord_row["service_time_min"]) else 0
 
-            # Wait if early
+            # wait until window opens
             if tw_s is not None and tmin < tw_s:
                 tmin = tw_s
-
-            eta_hhmm = min_to_hhmm(tmin)
-            within_window = True
-            if tw_e is not None and tmin > tw_e:
-                within_window = False
 
             rows.append(
                 dict(
@@ -187,16 +260,15 @@ for v, route in enumerate(routes_idx, start=1):
                     order_id=str(ord_row["order_id"]),
                     lat=float(ord_row["lat"]),
                     lon=float(ord_row["lon"]),
-                    eta=eta_hhmm,
-                    tw_start=min_to_hhmm(tw_s),
-                    tw_end=min_to_hhmm(tw_e),
-                    within_window=within_window,
+                    eta=min_to_ampm(tmin),
+                    tw_start=min_to_ampm(tw_s),
+                    tw_end=min_to_ampm(tw_e),
+                    within_window=(True if (tw_e is None or tmin <= tw_e) else False),
                     leg_km=round(leg_km, 2),
                 )
             )
 
-            # Add service time before next leg
-            tmin += svc
+            tmin += svc  # service before next leg
 
 df_plan = pd.DataFrame(rows)
 if df_plan.empty:
@@ -207,19 +279,22 @@ if df_plan.empty:
 df_plan["alert"] = df_plan.apply(lambda r: "" if (r["within_window"] in (True, "—")) else "Late risk", axis=1)
 df_plan["status"] = "Planned"
 
-# Persist for other pages
+# Persist
 st.session_state["routes_df"] = df_plan.copy()
 st.session_state["settings"] = dict(
     speed_kph=float(speed_kph),
     max_stops_per_vehicle=int(max_stops_per_vehicle),
     num_vehicles=int(num_vehicles),
-    shift_start=shift_start,
+    use_sweep=bool(use_sweep),
+    use_two_opt=bool(use_two_opt),
     depot_lat=depot[0],
     depot_lon=depot[1],
+    shift_time=str(shift_time),
 )
 
 # ---------------- Results table ----------------
 st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
+st.caption(f"Shift start: **{min_to_ampm(time_now_min)}** (Asia/Manila)")
 st.markdown("### Planned routes")
 
 df_show = df_plan.copy()
@@ -229,13 +304,10 @@ df_show["Lat"] = pd.to_numeric(df_show["lat"], errors="coerce").round(4)
 df_show["Lon"] = pd.to_numeric(df_show["lon"], errors="coerce").round(4)
 
 hide_coords = st.checkbox("Hide coordinates", value=True)
-
-# Rename FIRST, then select using the NEW names (prevents KeyError)
 display_df = df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})
 display_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "alert"]
 if not hide_coords:
     display_cols += ["Lat", "Lon"]
-
 st.dataframe(display_df[display_cols], use_container_width=True, hide_index=True)
 
 # ---------------- Summary ----------------
@@ -255,11 +327,18 @@ def last_eta(series: pd.Series) -> str:
             return v
     return "—"
 
-# distance per route
 def route_distance_km(route_idx: list[int]) -> float:
     return float(sum(D_km[route_idx[i], route_idx[i + 1]] for i in range(len(route_idx) - 1)))
 
-veh_routes = {f"V{i+1}": r for i, r in enumerate(routes_idx)}
+veh_routes = {}
+# Rebuild per-vehicle route index sequences (matching 'Vehicle' naming)
+veh_names = sorted(display_df["Vehicle"].unique(), key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+for i, vname in enumerate(veh_names, start=1):
+    # routes_idx is ordered by vehicle starting 1..V
+    if i-1 < len(routes_idx):
+        veh_routes[vname] = routes_idx[i-1]
+    else:
+        veh_routes[vname] = [0,0]
 
 summary = (
     display_df.sort_values(["Vehicle", "Stop #"], kind="mergesort")
@@ -273,8 +352,9 @@ summary = (
     .reset_index()
 )
 summary["Distance (km)"] = summary["Vehicle"].map(lambda v: round(route_distance_km(veh_routes.get(v, [0, 0])), 2))
-
 st.dataframe(summary, hide_index=True, use_container_width=True)
+
+st.metric("Total distance (km)", round(summary["Distance (km)"].sum(), 2))
 
 # ---------------- Optional map (pydeck) ----------------
 st.divider()
@@ -287,24 +367,16 @@ if st.checkbox("Show map (pydeck)", value=False):
         df_map["stop_idx"] = df_map.groupby("Vehicle").cumcount() + 1
         df_map = df_map.sort_values(["Vehicle", "stop_idx"], kind="mergesort").reset_index(drop=True)
 
-        # color per vehicle
         palette = np.array(
             [
-                [0, 122, 255],
-                [255, 45, 85],
-                [88, 86, 214],
-                [255, 149, 0],
-                [52, 199, 89],
-                [175, 82, 222],
-                [255, 59, 48],
-                [90, 200, 250],
+                [0, 122, 255], [255, 45, 85], [88, 86, 214], [255, 149, 0],
+                [52, 199, 89], [175, 82, 222], [255, 59, 48], [90, 200, 250],
             ]
         )
         veh_ids = df_map["Vehicle"].unique()
         cmap = {v: palette[i % len(palette)].tolist() for i, v in enumerate(veh_ids)}
         df_map["color"] = df_map["Vehicle"].map(cmap)
 
-        # path rows
         rows_path = []
         for v, g in df_map.groupby("Vehicle", sort=False):
             g = g.sort_values("stop_idx")
@@ -312,17 +384,8 @@ if st.checkbox("Show map (pydeck)", value=False):
             rows_path.append({"Vehicle": v, "path": pts, "color": cmap[v]})
         paths = pd.DataFrame(rows_path)
 
-        # depot point
         depot_df = pd.DataFrame(
-            [
-                {
-                    "Vehicle": "Depot",
-                    "Lat": st.session_state.get("settings", {}).get("depot_lat", depot[0]),
-                    "Lon": st.session_state.get("settings", {}).get("depot_lon", depot[1]),
-                    "stop_idx": 0,
-                    "ETA": "—",
-                }
-            ]
+            [{"Vehicle": "Depot", "Lat": depot[0], "Lon": depot[1], "stop_idx": 0, "ETA": "—"}]
         )
 
         layers = [
