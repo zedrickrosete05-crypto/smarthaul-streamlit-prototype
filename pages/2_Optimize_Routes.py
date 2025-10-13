@@ -1,9 +1,9 @@
 # pages/2_Optimize_Routes.py
 from __future__ import annotations
 
-# ---------- Build tag (visible so you know this file is running) ----------
-BUILD = "v1.3-am-pm-realtime"
-# Uncomment the next line once to nuke stale caches if needed:
+# ---------- Build tag (so you can confirm this file is running) ----------
+BUILD = "v1.4-am-pm-realtime-forced"
+# If you still see old behavior, uncomment once to clear cache:
 # import streamlit as _st; _st.cache_data.clear()
 
 import math, time, datetime as dt
@@ -93,7 +93,7 @@ orders["service_time_min"] = pd.to_numeric(orders["service_time_min"], errors="c
 with st.sidebar:
     st.header("Planner Settings")
     speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5)
-    max_stops_per_vehicle = st.slider("Max stops per route", 3, 50, 15, 1)
+    max_stops_per_route = st.slider("Max stops per route", 3, 50, 15, 1)
     num_vehicles = st.slider("Vehicles", 1, 50, 5, 1)
 
     st.subheader("Shift start (Asia/Manila)")
@@ -192,7 +192,7 @@ def two_opt(route: List[int], D: np.ndarray) -> List[int]:
 # ---------------- Build routes from current settings ----------------
 N = len(orders)
 V = max(1, min(int(num_vehicles), max(1, N)))
-cap = int(max_stops_per_vehicle)
+cap = int(max_stops_per_route)
 
 clusters = sweep_assign(V, cap)
 routes_idx: List[List[int]] = []
@@ -268,7 +268,7 @@ df_plan["status"] = "Planned"
 st.session_state["routes_df"] = df_plan.copy()
 st.session_state["settings"] = dict(
     speed_kph=float(speed_kph),
-    max_stops_per_vehicle=int(max_stops_per_vehicle),
+    max_stops_per_route=int(max_stops_per_route),
     num_vehicles=int(num_vehicles),
     depot_lat=depot[0],
     depot_lon=depot[1],
@@ -278,16 +278,20 @@ st.session_state["settings"] = dict(
 # ---------------- Results ----------------
 st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stops.")
 st.caption(f"Shift start: **{to_ampm(time_now_min)}** (Asia/Manila)")
-st.markdown("### Planned routes")
+st.markdown("### Planned routes ↩︎")
 
+# --- FORCE AM/PM AT RENDER TIME (even if anything upstream is cached) ---
 df_show = df_plan.copy()
+df_show["ETA"] = df_show["eta"].apply(to_ampm)
+df_show["TW_start_str"] = df_show["tw_start"].apply(to_ampm)
+df_show["TW_end_str"]   = df_show["tw_end"].apply(to_ampm)
 df_show["Stop #"] = df_show.groupby("vehicle_id").cumcount() + 1
-df_show["Time window"] = df_show["tw_start"].astype(str) + " – " + df_show["tw_end"].astype(str)
+df_show["Time window"] = df_show["TW_start_str"].astype(str) + " – " + df_show["TW_end_str"].astype(str)
 df_show["Lat"] = pd.to_numeric(df_show["lat"], errors="coerce").round(4)
 df_show["Lon"] = pd.to_numeric(df_show["lon"], errors="coerce").round(4)
 
 hide_coords = st.checkbox("Hide coordinates", value=True)
-display_df = df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})
+display_df = df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order"})
 display_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "alert"]
 if not hide_coords:
     display_cols += ["Lat", "Lon"]
