@@ -1,6 +1,11 @@
 # pages/2_Optimize_Routes.py
 from __future__ import annotations
 
+# ---------- Build tag (visible so you know this file is running) ----------
+BUILD = "v1.3-am-pm-realtime"
+# Uncomment the next line once to nuke stale caches if needed:
+# import streamlit as _st; _st.cache_data.clear()
+
 import math, time, datetime as dt
 from zoneinfo import ZoneInfo
 from typing import List, Tuple
@@ -12,6 +17,7 @@ import streamlit as st
 # ---------------- Page setup ----------------
 st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
 st.title("Optimize Routes")
+st.caption(f"Build: {BUILD}")
 PH_TZ = ZoneInfo("Asia/Manila")
 
 # ---------------- Guards ----------------
@@ -27,13 +33,11 @@ def to_ampm(minutes: int | float | None) -> str:
     """Minutes after midnight -> 'h:MM AM/PM'. Returns '—' if None/NaN."""
     if minutes is None or pd.isna(minutes):
         return "—"
-    m = int(minutes) % (24 * 60)
+    m = int(float(minutes)) % (24 * 60)
     h24, mm = divmod(m, 60)
-    suffix = "AM" if h24 < 12 else "PM"
-    h12 = h24 % 12
-    if h12 == 0:
-        h12 = 12
-    return f"{h12}:{mm:02d} {suffix}"
+    ampm = "AM" if h24 < 12 else "PM"
+    h12 = h24 % 12 or 12
+    return f"{h12}:{mm:02d} {ampm}"
 
 def hhmm_to_min(s: str | int | float | None) -> int | None:
     if s is None or (isinstance(s, float) and pd.isna(s)): return None
@@ -67,6 +71,7 @@ def distance_matrix(points: List[Tuple[float, float]]) -> np.ndarray:
     return M
 
 # ---------------- Normalize uploads ----------------
+# Accept both *_min and HH:MM string columns from Upload page
 if "service_time_min" not in orders.columns and "service_min" in orders.columns:
     orders["service_time_min"] = pd.to_numeric(orders["service_min"], errors="coerce").fillna(0).astype(int)
 if "tw_start_min" not in orders.columns and "tw_start" in orders.columns:
@@ -84,7 +89,7 @@ orders["lat"] = pd.to_numeric(orders["lat"], errors="coerce")
 orders["lon"] = pd.to_numeric(orders["lon"], errors="coerce")
 orders["service_time_min"] = pd.to_numeric(orders["service_time_min"], errors="coerce").fillna(0).astype(int)
 
-# ---------------- Sidebar: Planner Settings ----------------
+# ---------------- Sidebar: Planner Settings (live) ----------------
 with st.sidebar:
     st.header("Planner Settings")
     speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5)
@@ -98,10 +103,10 @@ with st.sidebar:
     shift_start_min = time_to_minutes(shift_time) or 8 * 60
 
     st.subheader("Realtime")
-    auto_refresh = st.toggle("Auto-refresh", value=True, help="Reruns the page at an interval so ETAs move in real time.")
+    auto_refresh = st.toggle("Auto-refresh", value=True, help="Reruns the page periodically so ETAs update in real time.")
     refresh_sec = st.slider("Refresh every (seconds)", 10, 120, 30, 5, disabled=not auto_refresh)
-    # True auto-refresh without extra packages: change a query param every N seconds
     if auto_refresh:
+        # True auto-refresh without extra packages: change a URL parameter every N seconds
         st.experimental_set_query_params(t=int(time.time() // refresh_sec))
 
     st.header("Depot")
@@ -184,7 +189,7 @@ def two_opt(route: List[int], D: np.ndarray) -> List[int]:
                     best, best_len, improved = new, new_len, True
     return best
 
-# Build routes using current planner settings
+# ---------------- Build routes from current settings ----------------
 N = len(orders)
 V = max(1, min(int(num_vehicles), max(1, N)))
 cap = int(max_stops_per_vehicle)
@@ -197,7 +202,7 @@ for cl in clusters:
         r = two_opt(r, D_km)
     routes_idx.append(r)
 
-# Any leftovers (should be none if sweep respected cap, but keep it safe)
+# Safety: assign any leftover nodes (unlikely with sweep + cap)
 assigned = set(j for cl in clusters for j in cl)
 if len(assigned) < N:
     leftovers = [j for j in range(1, N + 1) if j not in assigned]
@@ -241,9 +246,9 @@ for v, route in enumerate(routes_idx, start=1):
                     order_id=str(ord_row["order_id"]),
                     lat=float(ord_row["lat"]),
                     lon=float(ord_row["lon"]),
-                    eta=to_ampm(tmin),
-                    tw_start=to_ampm(tw_s),
-                    tw_end=to_ampm(tw_e),
+                    eta=to_ampm(tmin),          # AM/PM ETA
+                    tw_start=to_ampm(tw_s),     # AM/PM window start
+                    tw_end=to_ampm(tw_e),       # AM/PM window end
                     within_window=(True if (tw_e is None or tmin <= tw_e) else False),
                     leg_km=round(leg_km, 2),
                 )
@@ -259,7 +264,7 @@ if df_plan.empty:
 df_plan["alert"] = df_plan.apply(lambda r: "" if (r["within_window"] in (True, "—")) else "Late risk", axis=1)
 df_plan["status"] = "Planned"
 
-# Persist
+# Persist for other pages
 st.session_state["routes_df"] = df_plan.copy()
 st.session_state["settings"] = dict(
     speed_kph=float(speed_kph),
@@ -309,7 +314,6 @@ def route_distance_km(route_idx: list[int]) -> float:
     return float(sum(D_km[route_idx[i], route_idx[i + 1]] for i in range(len(route_idx) - 1)))
 
 veh_routes = {f"V{i+1}": r for i, r in enumerate(routes_idx)}
-
 summary = (
     display_df.sort_values(["Vehicle", "Stop #"], kind="mergesort")
     .groupby("Vehicle", sort=False)
