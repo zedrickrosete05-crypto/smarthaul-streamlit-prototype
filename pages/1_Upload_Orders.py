@@ -1,29 +1,28 @@
 # pages/1_Upload_Orders.py
 from __future__ import annotations
 
-# --- one-time nuke of stale cache so old validators can't linger ---
+# — clear any stale caches (safe on reloads) —
 import streamlit as st
 st.cache_data.clear()
 
-import io
-import re
-import time
-import json
-import urllib.parse
-import urllib.request
+import io, re, time, json, urllib.parse, urllib.request
 from typing import Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import pydeck as pdk
 
-# ================= Page header (watch this build tag) =================
+# ────────────────────────────────────────────────────────────────────────────────
+# Page header
+# ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Upload Orders", layout="wide")
-BUILD = "uploader-am/pm-proof-v2"
+BUILD = "uploader-am/pm-proof-v3"
 st.title("📦 Upload Orders")
 st.caption(f"Build: {BUILD}")
 
-# ================= Columns / canonical order =================
+# ────────────────────────────────────────────────────────────────────────────────
+# Columns
+# ────────────────────────────────────────────────────────────────────────────────
 REQUIRED = ["order_id", "tw_start", "tw_end", "service_min"]
 OPTIONAL = ["place", "lat", "lon", "demand", "priority", "hub", "notes"]
 CANONICAL = [
@@ -33,8 +32,18 @@ CANONICAL = [
     "demand", "priority", "hub", "notes",
 ]
 
-# ================= Time parsing (AM/PM + 24h + Excel + datetime) =================
-# Accepts '08:30 AM', '8:30am', '0830PM', '1 pm', '14:00', Excel time cells, pd.Timestamp/py time
+# allow a couple of header aliases (people often vary these)
+ALIASES = {
+    "service time (min)": "service_min",
+    "service_time": "service_min",
+    "service_minutes": "service_min",
+    "start": "tw_start",
+    "end": "tw_end",
+}
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Time parsing (AM/PM + 24h + Excel + datetime)
+# ────────────────────────────────────────────────────────────────────────────────
 _AMPM = re.compile(
     r"""^\s*
         (?P<h>\d{1,2})
@@ -90,7 +99,9 @@ def to_minutes(val: Any) -> Optional[int]:
     except Exception:
         return None
 
-# ================= Geocoding (cached, unique places) =================
+# ────────────────────────────────────────────────────────────────────────────────
+# Geocoding (cached, unique places)
+# ────────────────────────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def geocode_place(place: str) -> Optional[Tuple[float, float]]:
     url = (
@@ -128,7 +139,9 @@ def geocode_missing(df: pd.DataFrame, suffix=" Philippines", delay_s: float = 1.
         if p in cache:
             df.at[idx, "lat"], df.at[idx, "lon"] = cache[p]
 
-# ================= Template download =================
+# ────────────────────────────────────────────────────────────────────────────────
+# Template download
+# ────────────────────────────────────────────────────────────────────────────────
 def template_bytes() -> bytes:
     demo = pd.DataFrame({
         "order_id": ["O-1001", "O-1002", "O-1003", "O-1004", "O-1005"],
@@ -146,19 +159,31 @@ with st.expander("📁 Download CSV template"):
                        "orders_template_places.csv", "text/csv")
     st.caption("Accepted time examples: '08:30 AM', '8:30am', '0830PM', '14:00', Excel time cells.")
 
-# ================= Upload =================
+# ────────────────────────────────────────────────────────────────────────────────
+# Upload + read
+# ────────────────────────────────────────────────────────────────────────────────
 up = st.file_uploader("Upload Orders (CSV/XLSX)", type=["csv", "xlsx"])
 if not up:
     st.stop()
 
 try:
-    df = pd.read_csv(up) if up.name.lower().endswith(".csv") else pd.read_excel(up)
+    if up.name.lower().endswith(".csv"):
+        df = pd.read_csv(up)
+    else:
+        try:
+            df = pd.read_excel(up, engine="openpyxl")
+        except Exception:
+            df = pd.read_excel(up)  # fallback
 except Exception as e:
     st.error(f"Could not read file: {e}")
     st.stop()
 
 st.subheader("Preview (raw upload)")
 st.dataframe(df.head(50), use_container_width=True)
+
+# normalize headers (aliases)
+ren = {c: ALIASES.get(c.strip().lower(), c) for c in df.columns}
+df = df.rename(columns=ren)
 
 # Ensure columns exist
 for c in REQUIRED + OPTIONAL:
@@ -171,6 +196,19 @@ for c in ["order_id", "place", "tw_start", "tw_end", "hub", "notes"]:
 for c in ["lat", "lon", "service_min", "demand", "priority"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
+# Drop duplicate order_ids (keep first, show info)
+dups = df["order_id"].duplicated(keep="first")
+if dups.any():
+    st.warning(f"Dropped {int(dups.sum())} duplicate order_id row(s) (keeping first occurrence).")
+    df = df.loc[~dups].copy()
+
+# Check hard-required
+missing_id = df["order_id"].isna() | (df["order_id"].str.strip() == "")
+if missing_id.any():
+    st.error("Some rows are missing order_id. Please fix and re-upload.")
+    st.dataframe(df.loc[missing_id, ["order_id", "place", "tw_start", "tw_end"]], use_container_width=True)
+    st.stop()
+
 # Parse times (AM/PM aware)
 df["tw_start_min"] = df["tw_start"].map(to_minutes)
 df["tw_end_min"]   = df["tw_end"].map(to_minutes)
@@ -178,6 +216,7 @@ df["tw_end_min"]   = df["tw_end"].map(to_minutes)
 bad_mask = df["tw_start_min"].isna() | df["tw_end_min"].isna()
 if bad_mask.any():
     st.error(f"{int(bad_mask.sum())} row(s) have invalid time format in tw_start/tw_end.")
+    st.caption("Accepted: '08:30 AM', '8:30am', '0830PM', '14:00', Excel time cells, or datetime.")
     st.dataframe(df.loc[bad_mask, ["order_id", "tw_start", "tw_end"]], use_container_width=True)
     st.stop()
 
@@ -204,7 +243,7 @@ ok_rows = int((~(df["lat"].isna() | df["lon"].isna())).sum())
 st.success(f"Loaded {len(df)} order(s). With coordinates: {ok_rows}")
 st.dataframe(df, use_container_width=True)
 
-# Map preview
+# Optional map
 if ok_rows:
     st.subheader("Map preview")
     st.pydeck_chart(
