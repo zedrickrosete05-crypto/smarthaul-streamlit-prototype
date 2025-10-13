@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="SmartHaul – Dispatch and Monitor", layout="wide")
-BUILD = "dispatch-v3"
+BUILD = "dispatch-v3.1"
 st.title("Dispatch and Monitor")
 st.caption(f"Build: {BUILD}")
 
@@ -19,8 +19,7 @@ def now_ampm() -> str:
     return f"{h12}:{m:02d} {ampm}"
 
 def update_route_status(vehicle: str, order: str, status: str) -> None:
-    """Update status in routes_df for the selected vehicle+order."""
-    if "routes_df" not in st.session_state:  # safety
+    if "routes_df" not in st.session_state:
         return
     df = st.session_state["routes_df"]
     mask = (df["vehicle_id"].astype(str) == vehicle) & (df["order_id"].astype(str) == order)
@@ -28,10 +27,19 @@ def update_route_status(vehicle: str, order: str, status: str) -> None:
         df.loc[mask, "status"] = status
         st.session_state["routes_df"] = df  # persist
 
+def safe_page_link(page: str, label: str) -> None:
+    """Call st.page_link in a way that works across Streamlit versions."""
+    try:
+        # newest signature
+        st.page_link(page, label=label)
+    except TypeError:
+        # very old versions may not have page_link; fall back to markdown
+        st.markdown(f"[{label}]({page})")
+
 # ---------- guards ----------
 if "routes_df" not in st.session_state or st.session_state["routes_df"] is None:
     st.warning("No routes available. Plan routes first.")
-    st.page_link("pages/2_Optimize_Routes.py", "← Optimize Routes", icon="⬅️")
+    safe_page_link("pages/2_Optimize_Routes.py", "← Optimize Routes")
     st.stop()
 
 routes = st.session_state["routes_df"].copy()
@@ -93,7 +101,6 @@ if log.empty:
     st.info("No events yet.")
 else:
     st.dataframe(log.iloc[::-1].reset_index(drop=True), use_container_width=True, hide_index=True)
-
     cdl, clr = st.columns([0.5, 0.5])
     cdl.download_button(
         "⬇️ Export dispatch log (CSV)",
