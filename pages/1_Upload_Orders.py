@@ -1,104 +1,351 @@
 # pages/1_Upload_Orders.py
+from __future__ import annotations
+
+import io
+import math
+import re
+import time
+from typing import Any, Optional, Tuple
+
 import pandas as pd
 import streamlit as st
+import pydeck as pdk
 
+# -------------------- Page setup --------------------
 st.set_page_config(page_title="SmartHaul – Upload Orders", layout="wide")
 st.title("Upload Orders")
 
+# -------------------- Schema --------------------
+# Required columns (strings as provided by your existing app)
 REQUIRED_COLS = ["order_id", "tw_start", "tw_end", "service_min"]
-OPTIONAL_COLS = ["lat", "lon", "place"]  # at least (lat & lon) OR place must be present
+# Optional columns. At least (lat & lon) OR place must be present per row.
+OPTIONAL_COLS = ["lat", "lon", "place", "demand", "priority", "hub", "notes"]
 
-# Template with 'place'
-template = pd.DataFrame([
-    {"order_id":"O-1001","place":"JY Square, Cebu City","tw_start":"08:30","tw_end":"11:00","service_min":7},
-    {"order_id":"O-1002","place":"Cebu IT Park","tw_start":"09:00","tw_end":"12:00","service_min":5},
-    {"order_id":"O-1003","place":"SM City Cebu","tw_start":"10:00","tw_end":"13:00","service_min":10},
-])
-st.download_button("Download CSV template (with place)", template.to_csv(index=False).encode(),
-                   file_name="orders_template_places.csv", mime="text/csv")
+ALL_COLS = REQUIRED_COLS + OPTIONAL_COLS
 
-st.caption("Required: order_id, tw_start (HH:MM), tw_end (HH:MM), service_min (min). Provide either lat+lon or place (address/name).")
+LAT_MIN, LAT_MAX = -90.0, 90.0
+LON_MIN, LON_MAX = -180.0, 180.0
+
+
+# -------------------- Helpers --------------------
+def _coerce_numeric(series: pd.Series, dtype: str = "float64") -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").astype(dtype)
+
+
+def _within(v: float, lo: float, hi: float) -> bool:
+    return v is not None and not pd.isna(v) and lo <= float(v) <= hi
+
+
+def _parse_time(s: Any) -> Optional[pd.Timestamp]:
+    """Accept 'HH:MM'/'H:MM' or full datetime; return pandas Timestamp or None."""
+    if pd.isna(s):
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    try:
+        if re.fullmatch(r"\d{1,2}:\d{2}", s):
+            return pd.to_datetime(f"1970-01-01 {s}", utc=False, errors="raise")
+        return pd.to_datetime(s, utc=False, errors="raise")
+    except Exception:
+        return None
+
+
+def _fmt_hhmm(ts: Optional[pd.Timestamp]) -> str:
+    return "" if ts is None else ts.strftime("%H:%M")
+
+
+# ---- polite, no-key OSM geocoder (swap with Mapbox/Google in prod) ----
+@st.cache_data(show_spinner=False)
+def geocode_place_nominatim(q: str) -> Optional[Tuple[float, float]]:
+    import urllib.parse, urllib.request, json
+
+    base = "https://nominatim.openstreetmap.org/search"
+    url = f"{base}?q={urllib.parse.quote(q)}&format=json&limit=1"
+    req = urllib.request.Request(url, headers={"User-Agent": "SmartHaul/1.0"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    time.sleep(1.1)  # be nice to the free service
+    if data:
+        return float(data[0]["lat"]), float(data[0]["lon"])
+    return None
+
+
+# -------------------- CSV Template --------------------
+template = pd.DataFrame(
+    [
+        {
+            "order_id": "O-1001",
+            "place": "JY Square, Cebu City",
+            "tw_start": "08:30",
+            "tw_end": "11:00",
+            "service_min": 7,
+            "lat": pd.NA,
+            "lon": pd.NA,
+            "demand": 10,
+            "priority": 2,
+            "hub": "Main",
+            "notes": "fragile",
+        },
+        {
+            "order_id": "O-1002",
+            "place": "Cebu IT Park",
+            "tw_start": "09:00",
+            "tw_end": "12:00",
+            "service_min": 5,
+            "lat": pd.NA,
+            "lon": pd.NA,
+            "demand": 5,
+            "priority": 1,
+            "hub": "Main",
+            "notes": "",
+        },
+        {
+            "order_id": "O-1003",
+            "place": "SM City Cebu",
+            "tw_start": "10:00",
+            "tw_end": "13:00",
+            "service_min": 10,
+            "lat": pd.NA,
+            "lon": pd.NA,
+            "demand": 8,
+            "priority": 3,
+            "hub": "Main",
+            "notes": "",
+        },
+    ]
+)
+
+st.download_button(
+    "Download CSV template (with place)",
+    template.to_csv(index=False).encode(),
+    file_name="orders_template_places.csv",
+    mime="text/csv",
+)
+
+st.caption(
+    "Required columns: **order_id, tw_start (HH:MM), tw_end (HH:MM), service_min (minutes)**. "
+    "Provide **either** `lat & lon` **or** `place` (address/name) for each row. "
+    "Optional: demand, priority, hub, notes."
+)
+
+# -------------------- File uploader --------------------
 file = st.file_uploader("Upload Orders CSV", type=["csv"], key="orders_csv")
 
-def _to_minutes(s: pd.Series) -> pd.Series:
-    dt = pd.to_datetime(s.astype(str), format="%H:%M", errors="coerce")
-    return (dt.dt.hour * 60 + dt.dt.minute).astype("Int64")
+use_geocoding = st.toggle(
+    "Geocode rows missing coordinates from `place`",
+    value=True,
+    help="If latitude/longitude are blank, try to fetch from address using OpenStreetMap (Nominatim).",
+)
 
-if file:
-    try:
-        raw = pd.read_csv(file)
-        st.markdown("**Preview (raw upload):**")
-        st.dataframe(raw.head(), use_container_width=True)
 
-        # Required columns present?
-        miss_req = [c for c in REQUIRED_COLS if c not in raw.columns]
-        if miss_req:
-            st.error(f"Missing required columns: {miss_req}")
-            st.stop()
+# -------------------- Validation & Cleaning --------------------
+def clean_and_validate(df_raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Returns (clean_df, issues_df).
+    issues_df columns: row, field, level ('error'|'warning'), message.
+    """
+    issues = []
 
-        df = raw.copy()
+    # Normalize header names (lower, strip) → canonical names
+    lookup = {c.lower().strip(): c for c in df_raw.columns}
+    def col(name: str) -> Optional[str]:
+        return lookup.get(name.lower())
 
-        # Parse/validate times + service_min
-        df["service_min"] = pd.to_numeric(df["service_min"], errors="coerce")
-        df["tw_start_min"] = _to_minutes(df["tw_start"])
-        df["tw_end_min"]   = _to_minutes(df["tw_end"])
+    # Create missing optional columns, check required ones
+    df = df_raw.copy()
+    for c in ALL_COLS:
+        src = col(c)
+        if src is None:
+            if c in REQUIRED_COLS:
+                issues.append(
+                    {"row": None, "field": c, "level": "error", "message": f"Missing required column '{c}'"}
+                )
+            else:
+                df[c] = pd.Series(dtype="object")
+        else:
+            if src != c:
+                df.rename(columns={src: c}, inplace=True)
 
-        problems = []
-        if df["service_min"].isna().any(): problems.append("service_min must be numeric.")
-        bad_parse = df["tw_start_min"].isna() | df["tw_end_min"].isna()
-        if bad_parse.any(): problems.append(f"{int(bad_parse.sum())} row(s) have invalid HH:MM in tw_start/tw_end.")
-        bad_order = (df["tw_end_min"] < df["tw_start_min"]) & (~df["tw_end_min"].isna()) & (~df["tw_start_min"].isna())
-        if bad_order.any(): problems.append(f"{int(bad_order.sum())} row(s) have tw_end earlier than tw_start.")
-        dups = df.duplicated(subset=["order_id"], keep=False)
-        if dups.any(): problems.append(f"{int(dups.sum())} duplicate order_id value(s) found.")
+    if any(i["level"] == "error" for i in issues):
+        return pd.DataFrame(), pd.DataFrame(issues)
 
-        # Geocode if needed (when lat/lon missing and place exists)
-        if ("place" in df.columns) and (("lat" not in df.columns) or ("lon" not in df.columns) or df[["lat","lon"]].isna().any().any()):
-            from utils.geocode import geocode_place
-            st.info("Geocoding rows with missing coordinates from 'place'…")
-            lat_list, lon_list, misses = [], [], 0
-            for _, r in df.iterrows():
-                lat = r.get("lat", float("nan"))
-                lon = r.get("lon", float("nan"))
-                if pd.isna(lat) or pd.isna(lon):
-                    coords = geocode_place(str(r.get("place", "")))
-                    if coords:
-                        lat, lon = coords
+    # Types / coercions
+    df["order_id"] = df["order_id"].astype("string").str.strip()
+    df["place"] = df["place"].astype("string").str.strip() if "place" in df.columns else ""
+    df["service_min"] = _coerce_numeric(df["service_min"], "Float64")
+
+    # optional numerics
+    for coln in ["lat", "lon", "demand", "priority"]:
+        if coln in df.columns:
+            df[coln] = pd.to_numeric(df[coln], errors="coerce")
+
+    # Row-level checks
+    for idx, row in df.iterrows():
+        # order_id
+        if not row["order_id"]:
+            issues.append({"row": idx, "field": "order_id", "level": "error", "message": "order_id is required"})
+
+        # service_min
+        if pd.isna(row["service_min"]) or float(row["service_min"]) < 0:
+            issues.append({"row": idx, "field": "service_min", "level": "error", "message": "service_min must be ≥ 0"})
+
+        # time windows
+        ws = _parse_time(row.get("tw_start"))
+        we = _parse_time(row.get("tw_end"))
+        if row.get("tw_start") and ws is None:
+            issues.append({"row": idx, "field": "tw_start", "level": "error", "message": f"Unrecognized time '{row.get('tw_start')}'"})
+        if row.get("tw_end") and we is None:
+            issues.append({"row": idx, "field": "tw_end", "level": "error", "message": f"Unrecognized time '{row.get('tw_end')}'"})
+        if ws and we and we < ws:
+            issues.append({"row": idx, "field": "tw_end", "level": "error", "message": "tw_end earlier than tw_start"})
+
+        # location presence (either lat+lon OR place)
+        has_coords = _within(row.get("lat"), LAT_MIN, LAT_MAX) and _within(row.get("lon"), LON_MIN, LON_MAX)
+        has_place = bool(str(row.get("place") or "").strip())
+        if not has_coords and not has_place:
+            issues.append(
+                {"row": idx, "field": "location", "level": "error", "message": "Provide lat+lon or place"}
+            )
+
+        # coords sanity if provided
+        if pd.notna(row.get("lat")) or pd.notna(row.get("lon")):
+            if not (_within(row.get("lat"), LAT_MIN, LAT_MAX) and _within(row.get("lon"), LON_MIN, LON_MAX)):
+                issues.append(
+                    {"row": idx, "field": "lat/lon", "level": "error", "message": "Coordinates out of bounds"}
+                )
+
+    # duplicate order_id
+    dups = df["order_id"].duplicated(keep=False)
+    if dups.any():
+        for i in df.index[dups]:
+            issues.append({"row": i, "field": "order_id", "level": "error", "message": "duplicate order_id"})
+
+    # Early return on blocking errors
+    issues_df = pd.DataFrame(issues)
+    if not issues_df.empty and (issues_df["level"] == "error").any():
+        return pd.DataFrame(), issues_df.sort_values(["level", "row", "field"], na_position="first")
+
+    # Normalize times to HH:MM strings
+    df["tw_start"] = [_fmt_hhmm(_parse_time(v)) for v in df["tw_start"]]
+    df["tw_end"] = [_fmt_hhmm(_parse_time(v)) for v in df["tw_end"]]
+
+    return df.reset_index(drop=True), issues_df.sort_values(["level", "row", "field"], na_position="first")
+
+
+def try_geocode_missing(df: pd.DataFrame) -> tuple[pd.DataFrame, list[dict]]:
+    """Fill missing lat/lon using 'place'. Returns updated df and warnings list."""
+    notes = []
+    if "place" not in df.columns:
+        return df, notes
+
+    for idx, row in df.iterrows():
+        lat, lon, place = row.get("lat"), row.get("lon"), row.get("place")
+        has_coords = _within(lat, LAT_MIN, LAT_MAX) and _within(lon, LON_MIN, LON_MAX)
+        if (not has_coords) and str(place or "").strip():
+            try:
+                res = geocode_place_nominatim(place)
+                if res:
+                    glat, glon = res
+                    if _within(glat, LAT_MIN, LAT_MAX) and _within(glon, LON_MIN, LON_MAX):
+                        df.at[idx, "lat"] = float(glat)
+                        df.at[idx, "lon"] = float(glon)
                     else:
-                        misses += 1
-                        lat, lon = float("nan"), float("nan")
-                lat_list.append(lat); lon_list.append(lon)
-            df["lat"] = pd.to_numeric(lat_list, errors="coerce")
-            df["lon"] = pd.to_numeric(lon_list, errors="coerce")
-            if misses:
-                problems.append(f"{misses} row(s) could not be geocoded from 'place'.")
+                        notes.append({"row": idx, "field": "geocode", "level": "warning", "message": "geocoder returned out-of-bounds coords"})
+                else:
+                    notes.append({"row": idx, "field": "geocode", "level": "warning", "message": "no geocode result"})
+            except Exception as e:
+                notes.append({"row": idx, "field": "geocode", "level": "warning", "message": f"geocode error: {e}"})
+    return df, notes
 
-        # Final coordinate check
-        if "lat" not in df.columns or "lon" not in df.columns:
-            problems.append("Provide either lat+lon columns or a 'place' column to geocode.")
-        elif df["lat"].isna().any() or df["lon"].isna().any():
-            problems.append("Some rows are missing valid coordinates (lat/lon).")
 
-        if problems:
-            st.error("Validation issues:\n- " + "\n- ".join(problems))
-            st.stop()
+# -------------------- Main UI --------------------
+if file is None:
+    st.caption("Tip: You can upload multiple times; the latest valid upload replaces the current orders.")
+    st.stop()
 
-        # Canonical output for downstream pages
-        cleaned = df[["order_id", "lat", "lon", "service_min", "tw_start_min", "tw_end_min"]]
-        cleaned = cleaned.rename(columns={"service_min": "service_time_min"})
-        st.success(f"Loaded {len(cleaned)} orders ✅")
-        st.dataframe(cleaned.head(20), use_container_width=True)
+# Read CSV
+try:
+    df_raw = pd.read_csv(file)
+except Exception as e:
+    st.error(f"Could not read CSV: {e}")
+    st.stop()
 
-        st.session_state["orders_df"] = cleaned
+st.subheader("Preview")
+st.dataframe(df_raw.head(50), use_container_width=True)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Clear uploaded data"):
-                st.session_state.pop("orders_df", None); st.rerun()
-        with c2:
-            st.page_link("pages/2_Optimize_Routes.py", label="Proceed to Optimize Routes →", icon="➡️")
+with st.spinner("Validating…"):
+    base_df, issues_df = clean_and_validate(df_raw)
 
-    except Exception as e:
-        st.error(f"Could not read CSV: {e}")
+if not issues_df.empty:
+    err = issues_df[issues_df["level"] == "error"]
+    if not err.empty:
+        st.error("Found validation errors. Fix these and re-upload.")
+    else:
+        st.warning("No blocking errors, but there are warnings you may want to review.")
+    st.dataframe(issues_df, use_container_width=True)
+
+if base_df.empty:
+    st.stop()
+
+# Optional geocoding
+if use_geocoding:
+    with st.spinner("Geocoding rows with missing coordinates from 'place'…"):
+        geo_df, notes = try_geocode_missing(base_df.copy())
+    if notes:
+        st.info("Geocoding notes:")
+        st.dataframe(pd.DataFrame(notes), use_container_width=True)
+    work_df = geo_df
 else:
-    st.info("Tip: use the template above or upload your CSV. You can provide a **place** instead of lat/lon.")
+    work_df = base_df
+
+# Final check: still missing coords?
+missing = work_df["lat"].isna() | work_df["lon"].isna()
+if missing.any():
+    st.error(
+        f"{missing.sum()} row(s) still missing coordinates. Provide lat/lon or enable geocoding."
+    )
+    st.dataframe(work_df[missing][["order_id", "place", "lat", "lon"]], use_container_width=True)
+    st.stop()
+
+# Success: save and show
+st.success(f"Validated {len(work_df)} orders ✅")
+st.dataframe(work_df, use_container_width=True)
+
+# Save for downstream pages
+st.session_state["orders_df"] = work_df
+
+# Map preview
+try:
+    st.subheader("Map preview")
+    st.pydeck_chart(
+        pdk.Deck(
+            initial_view_state=pdk.ViewState(
+                latitude=float(work_df["lat"].mean()),
+                longitude=float(work_df["lon"].mean()),
+                zoom=11,
+            ),
+            layers=[
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=work_df,
+                    get_position="[lon, lat]",
+                    get_radius=50,
+                    pickable=True,
+                )
+            ],
+            tooltip={"text": "{order_id}\n{place}"},
+        )
+    )
+except Exception:
+    st.caption("Map preview unavailable (pydeck needs numeric lat/lon).")
+
+# Download cleaned file
+st.download_button(
+    "⬇️ Download cleaned orders",
+    data=work_df.to_csv(index=False).encode("utf-8"),
+    file_name="orders_cleaned.csv",
+    mime="text/csv",
+)
+
+st.info("Next: go to **Optimize Routes** to generate assignments and ETAs.")
