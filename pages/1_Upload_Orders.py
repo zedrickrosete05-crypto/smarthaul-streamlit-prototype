@@ -2,34 +2,31 @@
 from __future__ import annotations
 
 import io, re, time
-from typing import Optional, Tuple, Any
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
 
+# ---------- Page ----------
 st.set_page_config(page_title="SmartHaul – Upload Orders", layout="wide")
+BUILD = "upload-am-pm-v3"
 st.title("📦 Upload Orders")
-st.caption("Build: upload-am/pm-v2")
+st.caption(f"Build: {BUILD}")
 
-# ---------------- Required / optional columns ----------------
+# ---------- Columns ----------
 REQUIRED = ["order_id", "tw_start", "tw_end", "service_min"]
 OPTIONAL = ["place", "lat", "lon", "demand", "priority", "hub", "notes"]
 
-# ---------------- Robust time parsing ----------------
-# Accepts:
-#  - '08:30 AM', '8:30am', '0830PM', '1 pm'
-#  - '14:00' (24h)
-#  - pandas Timestamp / datetime.time
-#  - Excel time fraction (0..1)
+# ---------- Time parsing that ACCEPTS AM/PM + 24h + Excel ----------
 AMPM_RE = re.compile(
     r"""^\s*
         (?P<h>\d{1,2})
         (?:
             [:\u2236](?P<m>\d{2})   # 8:30 AM
             |
-            (?P<m2>\d{2})?         # 830PM -> h=8 m2=30
+            (?P<m2>\d{2})?         # 830PM -> m2=30 (minutes)
         )
         \s*(?P<ampm>a\.?m\.?|p\.?m\.?)\s*$
     """,
@@ -37,50 +34,49 @@ AMPM_RE = re.compile(
 )
 H24_RE = re.compile(r"^\s*(?P<h>[01]?\d|2[0-3])[:\u2236](?P<m>[0-5]\d)\s*$")
 
-def to_minutes(value: Any) -> Optional[int]:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
+def to_minutes(val: Any) -> Optional[int]:
+    """Return minutes after midnight or None."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
 
-    # datetime / Timestamp / time
-    if hasattr(value, "hour") and hasattr(value, "minute"):
-        return int(value.hour) * 60 + int(value.minute)
+    # datetime / time-like (pandas, python)
+    if hasattr(val, "hour") and hasattr(val, "minute"):
+        return int(val.hour) * 60 + int(val.minute)
 
     # Excel time fraction in [0,1]
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        x = float(value)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        x = float(val)
         if 0.0 <= x <= 1.0:
             return int(round(x * 24 * 60))
 
-    s = str(value).strip().replace("\u00A0", " ")
-    s = s.replace(".", "")  # remove dots in a.m./p.m.
+    s = str(val).strip().replace("\u00A0", " ")
+    s = s.replace(".", "")  # allow a.m./p.m.
 
     m = AMPM_RE.match(s)
     if m:
         h = int(m.group("h"))
-        mm = m.group("m")
-        if mm is None:
-            mm = m.group("m2") or "00"
-        mnt = int(mm)
+        mm = m.group("m") or m.group("m2") or "0"
+        minute = int(mm)
         ampm = m.group("ampm").lower()
         if "p" in ampm and h != 12:
             h += 12
         if "a" in ampm and h == 12:
             h = 0
-        if 0 <= h < 24 and 0 <= mnt < 60:
-            return h * 60 + mnt
+        if 0 <= h < 24 and 0 <= minute < 60:
+            return h * 60 + minute
 
     m = H24_RE.match(s)
     if m:
-        h = int(m.group("h")); mnt = int(m.group("m"))
-        return h * 60 + mnt
+        return int(m.group("h")) * 60 + int(m.group("m"))
 
+    # last resort
     try:
         ts = pd.to_datetime(s, errors="raise")
         return int(ts.hour) * 60 + int(ts.minute)
     except Exception:
         return None
 
-# ---------------- Geocoding (unique places, cached) ----------------
+# ---------- Geocoding (cached) ----------
 @st.cache_data(show_spinner=False)
 def geocode_place(place: str) -> Optional[Tuple[float, float]]:
     import urllib.parse, urllib.request, json
@@ -96,7 +92,7 @@ def geocode_place(place: str) -> Optional[Tuple[float, float]]:
         return float(data[0]["lat"]), float(data[0]["lon"])
     return None
 
-def geocode_unique(df: pd.DataFrame, country_suffix: str = " Philippines", delay_s: float = 1.0):
+def geocode_unique(df: pd.DataFrame, delay_s: float = 1.0, suffix: str = " Philippines"):
     cache = st.session_state.setdefault("geocode_cache", {})
     need = (df["place"].fillna("").str.strip() != "") & (df["lat"].isna() | df["lon"].isna())
     if not need.any():
@@ -106,7 +102,7 @@ def geocode_unique(df: pd.DataFrame, country_suffix: str = " Philippines", delay
     for i, p in enumerate(places, start=1):
         if p not in cache:
             try:
-                coords = geocode_place(p + country_suffix)
+                coords = geocode_place(p + suffix)
                 if coords:
                     cache[p] = coords
             except Exception:
@@ -119,7 +115,7 @@ def geocode_unique(df: pd.DataFrame, country_suffix: str = " Philippines", delay
         if p in cache:
             df.at[idx, "lat"], df.at[idx, "lon"] = map(float, cache[p])
 
-# ---------------- Template (AM/PM) ----------------
+# ---------- Template ----------
 def template_csv() -> bytes:
     demo = pd.DataFrame({
         "order_id": ["O-1001", "O-1002", "O-1003", "O-1004", "O-1005"],
@@ -129,17 +125,15 @@ def template_csv() -> bytes:
         "tw_end":   ["11:00 AM", "12:00 PM", "01:00 PM", "02:30 PM", "04:00 PM"],
         "service_min": [7, 5, 10, 6, 8],
     })
-    buf = io.StringIO()
-    demo.to_csv(buf, index=False)
+    buf = io.StringIO(); demo.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
 
 with st.expander("📁 Download CSV template"):
     st.download_button("Download template", data=template_csv(),
                        file_name="orders_template_places.csv", mime="text/csv")
-    st.caption("Times may be **AM/PM** ('08:30 AM', '1:05pm', '0830PM') **or** 24-hour ('14:00'). "
-               "Provide either **place** (we’ll geocode) or **lat+lon**.")
+    st.caption("Times may be **AM/PM** (e.g. '08:30 AM', '0830PM') or **24-hour** ('14:00').")
 
-# ---------------- Upload ----------------
+# ---------- Upload ----------
 file = st.file_uploader("Upload orders (CSV or Excel)", type=["csv", "xlsx"])
 if not file:
     st.stop()
@@ -159,24 +153,24 @@ for col in REQUIRED + OPTIONAL:
     if col not in df.columns:
         df[col] = pd.NA
 
-# Normalize basic types
+# Normalize
 for c in ["order_id", "place", "tw_start", "tw_end", "hub", "notes"]:
     df[c] = df[c].astype("string").str.strip()
 for c in ["lat", "lon", "service_min", "demand", "priority"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# ---- Parse times (AM/PM aware) ----
+# ---------- Parse times (AM/PM aware) ----------
 df["tw_start_min"] = df["tw_start"].map(to_minutes)
 df["tw_end_min"]   = df["tw_end"].map(to_minutes)
 
 bad = df[df["tw_start_min"].isna() | df["tw_end_min"].isna()]
 if not bad.empty:
-    st.error(f"{len(bad)} row(s) have invalid time formats in tw_start/tw_end.")
-    st.caption("Accepted examples: '08:30 AM', '8:30am', '0830PM', '14:00', Excel time values.")
+    st.error(f"{len(bad)} row(s) have invalid time in tw_start/tw_end.")
+    st.caption("Accepted: '08:30 AM', '8:30am', '0830PM', '14:00', Excel time values.")
     st.dataframe(bad[["order_id", "tw_start", "tw_end"]], use_container_width=True)
     st.stop()
 
-# ---- Basic validations ----
+# Other validations
 missing_id = df["order_id"].isna() | (df["order_id"].str.strip() == "")
 if missing_id.any():
     st.error("Some rows are missing order_id.")
@@ -185,22 +179,15 @@ if missing_id.any():
 
 df["service_time_min"] = pd.to_numeric(df["service_min"], errors="coerce").fillna(0).clip(lower=0).astype(int)
 
-# ---- Geocode if needed ----
+# Geocode if needed
 if "lat" not in df.columns or "lon" not in df.columns:
     df["lat"], df["lon"] = np.nan, np.nan
-
 need_geo = (df["lat"].isna() | df["lon"].isna()) & (df["place"].fillna("").str.strip() != "")
 if need_geo.any():
     st.info("Geocoding rows with missing coordinates from 'place'…")
-    geocode_unique(df, country_suffix=" Philippines", delay_s=1.0)
+    geocode_unique(df, delay_s=1.0, suffix=" Philippines")
 
-# Still missing coords?
-missing_coords = df["lat"].isna() | df["lon"].isna()
-if missing_coords.any():
-    st.warning(f"{int(missing_coords.sum())} row(s) still missing coordinates.")
-    st.dataframe(df.loc[missing_coords, ["order_id", "place"]], use_container_width=True)
-
-# ---- Canonical order + persist ----
+# Canonical order
 cols = [
     "order_id", "place", "lat", "lon",
     "tw_start", "tw_end", "service_min",
@@ -214,7 +201,6 @@ df = df[cols].copy()
 
 ok_rows = int((~(df["lat"].isna() | df["lon"].isna())).sum())
 st.success(f"Loaded {len(df)} order(s). With coordinates: {ok_rows}")
-
 st.dataframe(df, use_container_width=True)
 
 if ok_rows:
@@ -237,13 +223,12 @@ if ok_rows:
         )
     )
 
+# Persist + download
 st.session_state["orders_df"] = df.copy()
-
 st.download_button(
     "⬇️ Download cleaned orders (CSV)",
     data=df.to_csv(index=False).encode("utf-8"),
     file_name="orders_cleaned.csv",
     mime="text/csv",
 )
-
 st.info("Next: open **Optimize Routes** to generate assignments and ETAs (AM/PM).")
