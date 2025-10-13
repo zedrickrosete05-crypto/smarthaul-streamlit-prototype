@@ -13,7 +13,7 @@ import streamlit as st
 # Page
 # ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
-BUILD = "optimize-am/pm-v3"
+BUILD = "optimize-capacity-duration-v1"
 st.title("Optimize Routes")
 st.caption(f"Build: {BUILD}")
 
@@ -22,16 +22,27 @@ st.caption(f"Build: {BUILD}")
 # ────────────────────────────────────────────────────────────────────────────────
 if "orders_df" not in st.session_state or st.session_state["orders_df"] is None:
     st.warning("No orders loaded. Go to **Upload Orders** first.")
-    st.page_link("pages/1_Upload_Orders.py", label="← Open Upload Orders", icon="⬅️")
+    try:
+        st.page_link("pages/1_Upload_Orders.py", label="← Open Upload Orders")
+    except Exception:
+        st.markdown("[← Open Upload Orders](pages/1_Upload_Orders.py)")
     st.stop()
 
-orders = st.session_state["orders_df"].reset_index(drop=True)
-# Expected columns: order_id, place, lat, lon, tw_start_min, tw_end_min, service_time_min
+orders_raw = st.session_state["orders_df"].copy()
 
-# Basic safety for coords
-if orders[["lat", "lon"]].isna().any().any():
-    st.warning("Some orders have missing coordinates. They will be skipped for planning.")
-orders = orders.dropna(subset=["lat", "lon"]).reset_index(drop=True)
+# Coerce required numeric fields
+for col in ["lat", "lon", "service_time_min", "tw_start_min", "tw_end_min", "demand"]:
+    if col not in orders_raw.columns:
+        orders_raw[col] = np.nan
+orders_raw["lat"] = pd.to_numeric(orders_raw["lat"], errors="coerce")
+orders_raw["lon"] = pd.to_numeric(orders_raw["lon"], errors="coerce")
+orders_raw["service_time_min"] = pd.to_numeric(orders_raw["service_time_min"], errors="coerce").fillna(0).clip(lower=0).astype(int)
+orders_raw["tw_start_min"] = pd.to_numeric(orders_raw["tw_start_min"], errors="coerce")
+orders_raw["tw_end_min"] = pd.to_numeric(orders_raw["tw_end_min"], errors="coerce")
+orders_raw["demand"] = pd.to_numeric(orders_raw.get("demand", 1), errors="coerce").fillna(1).clip(lower=0).astype(int)
+
+# Drop rows without coordinates
+orders = orders_raw.dropna(subset=["lat", "lon"]).reset_index(drop=True)
 if orders.empty:
     st.error("No orders with coordinates available to plan.")
     st.stop()
@@ -71,33 +82,34 @@ def distance_matrix(points: List[Tuple[float, float]]) -> np.ndarray:
 with st.sidebar:
     st.header("Planner Settings")
     speed_kph = st.slider("Avg speed (km/h)", 15, 90, 30, 5)
-    max_stops_per_vehicle = st.slider("Max stops per route", 3, 50, 15, 1)
-    num_vehicles = st.slider("Vehicles", 1, 50, 5, 1)
+    max_stops_per_vehicle = st.slider("Max stops per route", 3, 100, 30, 1)
+
+    st.subheader("Vehicles")
+    num_vehicles = st.slider("Number of vehicles", 1, 100, 5, 1)
+    vehicle_capacity = st.number_input("Vehicle capacity (sum of order 'demand')", min_value=0, value=30, step=1)
+    max_route_minutes = st.number_input("Max route duration (minutes)", min_value=30, value=8*60, step=15)
 
     st.subheader("Shift start")
     use_now = st.toggle("Use current time", value=True)
     shift_time = (
         dt.datetime.now().time().replace(second=0, microsecond=0)
-        if use_now
-        else st.time_input("Pick time", dt.time(8, 0), step=dt.timedelta(minutes=5))
+        if use_now else st.time_input("Pick time", dt.time(8, 0), step=dt.timedelta(minutes=5))
     )
 
-    # Optional manual depot
     st.subheader("Depot")
     use_manual_depot = st.checkbox("Use manual depot (place)", value=False)
     depot_coords = None
     if use_manual_depot:
         depot_place = st.text_input("Depot place", "Cebu IT Park")
         try:
-            # Reuse your uploader geocoder if present
-            from utils.geocode import geocode_place  # type: ignore
+            from utils.geocode import geocode_place  # optional; ignore if missing
             depot_coords = geocode_place(depot_place)
         except Exception:
             depot_coords = None
         if depot_coords is None:
-            st.info("Using fallback depot = centroid (could not geocode place).")
+            st.info("Using centroid as depot (could not geocode).")
 
-# Fallback depot = centroid of orders
+# Fallback depot = centroid
 if depot_coords is None:
     depot = (float(orders["lat"].mean()), float(orders["lon"].mean()))
 else:
@@ -109,29 +121,47 @@ else:
 points = [depot] + list(zip(orders["lat"].tolist(), orders["lon"].tolist()))
 D_km = distance_matrix(points)
 
-# ────────────────────────────────────────────────────────────────────────────────
-# Clustering + routing (sweep -> NN -> 2-opt)
-# ────────────────────────────────────────────────────────────────────────────────
-def sweep_clusters(v_count: int, cap: int) -> list[list[int]]:
-    """Split orders (1..N) into v_count clusters by polar angle around depot."""
-    if len(points) <= 1:
-        return [[] for _ in range(v_count)]
-    def angle(idx: int) -> float:
-        lat, lon = points[idx]
-        dy = lat - depot[0]
-        dx = (lon - depot[1]) * math.cos(math.radians(depot[0]))
-        return (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+# Speed in minutes per km
+v_speed_km_min = max(float(speed_kph), 5.0) / 60.0
+shift_start_min = int(shift_time.hour) * 60 + int(shift_time.minute)
 
-    nodes = list(range(1, len(points)))
-    nodes.sort(key=angle)
+# ────────────────────────────────────────────────────────────────────────────────
+# Capacity-aware sweep clustering (angle ordering) with stop cap
+# ────────────────────────────────────────────────────────────────────────────────
+def angle(idx: int) -> float:
+    lat, lon = points[idx]
+    dy = lat - depot[0]
+    dx = (lon - depot[1]) * math.cos(math.radians(depot[0]))
+    return (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
 
-    clusters = [[] for _ in range(v_count)]
-    i = 0
-    for n in nodes:
+nodes = list(range(1, len(points)))
+nodes.sort(key=angle)
+
+clusters: list[list[int]] = [[] for _ in range(int(num_vehicles))]
+cluster_loads = [0 for _ in range(int(num_vehicles))]
+i = 0
+for n in nodes:
+    dem = int(orders.iloc[n-1]["demand"])
+    # rotate until we find a vehicle with space
+    tries = 0
+    while tries < num_vehicles and (cluster_loads[i] + dem > vehicle_capacity or len(clusters[i]) >= max_stops_per_vehicle):
+        i = (i + 1) % int(num_vehicles)
+        tries += 1
+    # assign if any fits; otherwise leave unassigned for later
+    if cluster_loads[i] + dem <= vehicle_capacity and len(clusters[i]) < max_stops_per_vehicle:
         clusters[i].append(n)
-        if len(clusters[i]) >= cap:
-            i = (i + 1) % v_count
-    return clusters
+        cluster_loads[i] += dem
+        i = (i + 1) % int(num_vehicles)
+
+# Any nodes still not assigned because of capacity/stop-cap?
+assigned_set = set([n for cl in clusters for n in cl])
+unassigned_nodes = [n for n in nodes if n not in assigned_set]
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Route construction: nearest neighbor → 2-opt, with duration check
+# ────────────────────────────────────────────────────────────────────────────────
+def route_len_km(route: list[int]) -> float:
+    return float(sum(D_km[route[i], route[i+1]] for i in range(len(route)-1)))
 
 def nearest_neighbor_route(cluster: list[int]) -> list[int]:
     if not cluster:
@@ -147,33 +177,111 @@ def nearest_neighbor_route(cluster: list[int]) -> list[int]:
     route.append(0)
     return route
 
-def route_len(route: list[int]) -> float:
-    return float(sum(D_km[route[i], route[i+1]] for i in range(len(route)-1)))
-
 def two_opt(route: list[int]) -> list[int]:
     best = route[:]
     improved = True
     while improved:
         improved = False
-        for i in range(1, len(best)-2):
-            for k in range(i+1, len(best)-1):
+        for i in range(1, len(best) - 2):
+            for k in range(i + 1, len(best) - 1):
                 if k - i == 1:
                     continue
                 new = best[:i] + best[i:k][::-1] + best[k:]
-                if route_len(new) + 1e-9 < route_len(best):
+                if route_len_km(new) + 1e-9 < route_len_km(best):
                     best = new
                     improved = True
     return best
 
-clusters = sweep_clusters(int(num_vehicles), int(max_stops_per_vehicle))
-routes_idx = [two_opt(nearest_neighbor_route(c)) for c in clusters]
+def simulate_route_time_minutes(route: list[int]) -> int:
+    """
+    Returns total minutes from shift start until returning to depot,
+    including driving, waiting for windows, and service times.
+    """
+    tmin = shift_start_min
+    for i in range(len(route) - 1):
+        a, b = route[i], route[i+1]
+        leg_km = float(D_km[a, b])
+        drive = int(round(leg_km / v_speed_km_min)) if v_speed_km_min > 0 else 0
+        tmin += drive
+        if b != 0:
+            row = orders.iloc[b - 1]
+            tw_s = int(row["tw_start_min"]) if pd.notna(row["tw_start_min"]) else None
+            svc = int(row["service_time_min"]) if pd.notna(row["service_time_min"]) else 0
+            if tw_s is not None and tmin < tw_s:
+                tmin = tw_s
+            tmin += svc
+    return tmin - shift_start_min
+
+# Build routes per cluster and trim if duration exceeds limit
+routes_idx: list[list[int]] = []
+overflow_nodes: list[int] = []
+
+for cl in clusters:
+    base = two_opt(nearest_neighbor_route(cl))
+    if base == [0, 0]:
+        routes_idx.append(base)
+        continue
+
+    # If duration fits, take it. Otherwise, trim from the tail into overflow.
+    if simulate_route_time_minutes(base) <= max_route_minutes:
+        routes_idx.append(base)
+        continue
+
+    # Greedy trimming: pop interior nodes (before depot) until within limit.
+    route = base[:]
+    removed = []
+    while len(route) > 3 and simulate_route_time_minutes(route) > max_route_minutes:
+        # Remove the node whose removal reduces time the most (simple heuristic)
+        best_gain = -1
+        best_pos = None
+        for pos in range(1, len(route) - 1):  # don't remove depots at 0 or -1
+            trial = route[:pos] + route[pos+1:]
+            gain = simulate_route_time_minutes(route) - simulate_route_time_minutes(trial)
+            if gain > best_gain:
+                best_gain, best_pos = gain, pos
+        if best_pos is None:
+            break
+        removed.append(route[best_pos])
+        route = route[:best_pos] + route[best_pos+1:]
+
+    routes_idx.append(route if route else [0, 0])
+    overflow_nodes.extend(removed)
+
+# Try to place overflow + initially unassigned onto any route with spare capacity & duration
+def route_demand(route: list[int]) -> int:
+    if not route: return 0
+    return int(sum(int(orders.iloc[n-1]["demand"]) for n in route if n != 0))
+
+for n in overflow_nodes + unassigned_nodes:
+    placed = False
+    dem = int(orders.iloc[n-1]["demand"])
+    for r_i, r in enumerate(routes_idx):
+        # Capacity check
+        if route_demand(r) + dem > vehicle_capacity:
+            continue
+        # Try cheap insertions at best spot
+        best_route = None
+        best_len = float("inf")
+        for pos in range(1, len(r)):  # insert before depot at end too
+            cand = r[:pos] + [n] + r[pos:]
+            if simulate_route_time_minutes(cand) <= max_route_minutes:
+                L = route_len_km(cand)
+                if L < best_len:
+                    best_len = L; best_route = cand
+        if best_route is not None:
+            routes_idx[r_i] = best_route
+            placed = True
+            break
+    if not placed:
+        # Could not fit anywhere; keep unassigned
+        unassigned_nodes.append(n)
+
+# Deduplicate unassigned list
+unassigned_nodes = sorted(set(unassigned_nodes) - set([0]))
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Build ETAs and plan table
+# Build route plan with ETAs (AM/PM) + window checks
 # ────────────────────────────────────────────────────────────────────────────────
-v_speed_km_min = max(float(speed_kph), 5.0) / 60.0
-shift_start_min = int(shift_time.hour) * 60 + int(shift_time.minute)
-
 rows = []
 for v, route in enumerate(routes_idx, start=1):
     tmin = shift_start_min
@@ -189,7 +297,6 @@ for v, route in enumerate(routes_idx, start=1):
             tw_e = int(r["tw_end_min"]) if pd.notna(r["tw_end_min"]) else None
             svc = int(r["service_time_min"]) if pd.notna(r["service_time_min"]) else 0
 
-            # wait if arriving earlier than window start
             if tw_s is not None and tmin < tw_s:
                 tmin = tw_s
 
@@ -207,34 +314,43 @@ for v, route in enumerate(routes_idx, start=1):
                 tw_end=min_to_ampm(tw_e),
                 within_window=within,
                 leg_km=round(leg_km, 2),
+                demand=int(r["demand"]),
             ))
-
-            # add service duration before next leg
             tmin += svc
 
 df_plan = pd.DataFrame(rows)
-if df_plan.empty:
-    st.warning("No routes could be constructed. Check data and settings.")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Persist + UI
+# ────────────────────────────────────────────────────────────────────────────────
+if df_plan.empty and unassigned_nodes:
+    st.warning("All orders violated capacity/duration constraints and were left unassigned.")
+    st.stop()
+elif df_plan.empty:
+    st.warning("No routes could be constructed. Check your data and settings.")
     st.stop()
 
 df_plan["alert"] = df_plan.apply(
-    lambda r: "" if r["within_window"] in (True, "—") else "Late risk", axis=1
+    lambda r: "" if r["within_window"] in (True, "—") else "Late risk",
+    axis=1,
 )
 df_plan["status"] = "Planned"
 
-# Persist for other pages
+# Save for other pages
 st.session_state["routes_df"] = df_plan.copy()
 st.session_state["settings"] = dict(
     speed_kph=float(speed_kph),
     max_stops_per_vehicle=int(max_stops_per_vehicle),
     num_vehicles=int(num_vehicles),
+    vehicle_capacity=int(vehicle_capacity),
+    max_route_minutes=int(max_route_minutes),
     shift_start=min_to_ampm(shift_start_min),
     depot_lat=depot[0],
     depot_lon=depot[1],
 )
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Results table (AM/PM)
+# Results (AM/PM)
 # ────────────────────────────────────────────────────────────────────────────────
 st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stop(s).")
 st.markdown("### Planned routes")
@@ -246,27 +362,45 @@ df_show["Lat"] = pd.to_numeric(df_show["lat"], errors="coerce").round(4)
 df_show["Lon"] = pd.to_numeric(df_show["lon"], errors="coerce").round(4)
 
 hide_coords = st.checkbox("Hide coordinates", value=True)
-
 display_df = df_show.rename(columns={"vehicle_id": "Vehicle", "order_id": "Order", "eta": "ETA"})
-display_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "alert"]
+display_cols = ["Vehicle", "Stop #", "Order", "ETA", "Time window", "demand", "alert"]
 if not hide_coords:
     display_cols += ["Lat", "Lon"]
 
 st.dataframe(display_df[display_cols], use_container_width=True, hide_index=True)
 
 # ────────────────────────────────────────────────────────────────────────────────
+# Unassigned orders (if any)
+# ────────────────────────────────────────────────────────────────────────────────
+if unassigned_nodes:
+    ua = orders.iloc[[n-1 for n in sorted(set(unassigned_nodes))]][
+        ["order_id", "place", "demand", "tw_start_min", "tw_end_min"]
+    ].copy()
+    ua["Window"] = ua["tw_start_min"].map(min_to_ampm) + " – " + ua["tw_end_min"].map(min_to_ampm)
+    ua = ua.rename(columns={"order_id": "Order"})
+    st.warning(f"{len(ua)} order(s) could not be assigned due to capacity/duration/stop-cap.")
+    st.dataframe(ua[["Order", "place", "demand", "Window"]], use_container_width=True, hide_index=True)
+    # Keep for later pages if you want to handle them separately
+    st.session_state["unassigned_df"] = ua.copy()
+else:
+    st.session_state["unassigned_df"] = pd.DataFrame(columns=["Order"])
+
+# ────────────────────────────────────────────────────────────────────────────────
 # Summary
 # ────────────────────────────────────────────────────────────────────────────────
 st.divider()
 st.markdown("### Route summary")
+
 summary = (
     display_df.sort_values(["Vehicle", "Stop #"], kind="mergesort")
               .groupby("Vehicle", sort=False)
               .agg(Stops=("Order", "count"),
-                   **{"First ETA": ("ETA", "first")},
-                   **{"Last ETA": ("ETA", "last")},
+                   Load=("demand", "sum"),
+                   First_ETA=("ETA", "first"),
+                   Last_ETA=("ETA", "last"),
                    Alerts=("alert", lambda s: int((s != "").sum())))
               .reset_index()
+              .rename(columns={"First_ETA":"First ETA","Last_ETA":"Last ETA"})
 )
 st.dataframe(summary, hide_index=True, use_container_width=True)
 
@@ -278,7 +412,6 @@ st.markdown("### Map")
 if st.checkbox("Show map (pydeck)", value=False):
     try:
         import pydeck as pdk
-
         df_map = display_df.copy()
         df_map["stop_idx"] = df_map.groupby("Vehicle").cumcount() + 1
         df_map = df_map.sort_values(["Vehicle", "stop_idx"], kind="mergesort").reset_index(drop=True)
