@@ -1,7 +1,7 @@
 # pages/2_Optimize_Routes.py
 from __future__ import annotations
 
-import math
+import math, os
 import datetime as dt
 from typing import List, Tuple
 
@@ -13,9 +13,39 @@ import streamlit as st
 # Page
 # ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
-BUILD = "optimize-capacity-duration-v1"
+BUILD = "optimize-capacity-duration-v1 + persist"
 st.title("Optimize Routes")
 st.caption(f"Build: {BUILD}")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Simple persistence (routes saved to ./data/routes_df.csv)
+# ────────────────────────────────────────────────────────────────────────────────
+DATA_DIR = "data"; os.makedirs(DATA_DIR, exist_ok=True)
+ROUTES_PATH = os.path.join(DATA_DIR, "routes_df.csv")
+
+def save_routes(df: pd.DataFrame) -> None:
+    try:
+        df.to_csv(ROUTES_PATH, index=False)
+    except Exception:
+        pass
+
+def load_routes() -> pd.DataFrame | None:
+    try:
+        if os.path.exists(ROUTES_PATH):
+            return pd.read_csv(ROUTES_PATH)
+    except Exception:
+        return None
+    return None
+
+with st.sidebar:
+    if st.button("Load last plan"):
+        prev = load_routes()
+        if prev is not None and not prev.empty:
+            st.session_state["routes_df"] = prev.copy()
+            st.success(f"Restored plan with {len(prev)} stop(s).")
+            st.stop()
+        else:
+            st.info("No previous plan found.")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Guards
@@ -336,7 +366,7 @@ df_plan["alert"] = df_plan.apply(
 )
 df_plan["status"] = "Planned"
 
-# Save for other pages
+# Save for other pages (and to disk)
 st.session_state["routes_df"] = df_plan.copy()
 st.session_state["settings"] = dict(
     speed_kph=float(speed_kph),
@@ -348,6 +378,7 @@ st.session_state["settings"] = dict(
     depot_lat=depot[0],
     depot_lon=depot[1],
 )
+save_routes(df_plan)  # ← persist the plan
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Results (AM/PM)
@@ -380,7 +411,6 @@ if unassigned_nodes:
     ua = ua.rename(columns={"order_id": "Order"})
     st.warning(f"{len(ua)} order(s) could not be assigned due to capacity/duration/stop-cap.")
     st.dataframe(ua[["Order", "place", "demand", "Window"]], use_container_width=True, hide_index=True)
-    # Keep for later pages if you want to handle them separately
     st.session_state["unassigned_df"] = ua.copy()
 else:
     st.session_state["unassigned_df"] = pd.DataFrame(columns=["Order"])
