@@ -1,20 +1,18 @@
 # pages/2_Optimize_Routes.py
 from __future__ import annotations
 
-import math, os, time
-import datetime as dt
+import os, math, datetime as dt
 from typing import List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Page
 # ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Optimize Routes", layout="wide")
-BUILD = "optimize-capacity-duration + live-traffic+weather + persist"
+BUILD = "optimize-capacity-duration-v2-traffic-ready"
 st.title("Optimize Routes")
 st.caption(f"Build: {BUILD}")
 
@@ -30,7 +28,7 @@ def save_routes(df: pd.DataFrame) -> None:
     except Exception:
         pass
 
-def load_routes() -> pd.DataFrame | None:
+def load_routes() -> Optional[pd.DataFrame]:
     try:
         if os.path.exists(ROUTES_PATH):
             return pd.read_csv(ROUTES_PATH)
@@ -107,88 +105,19 @@ def distance_matrix(points: List[Tuple[float, float]]) -> np.ndarray:
             M[i, j] = M[j, i] = d
     return M
 
-# ---------- Live traffic & weather helpers (inline, cached) ----------
-def _latlng_str(pt: Tuple[float,float]) -> str:
-    return f"{pt[0]:.6f},{pt[1]:.6f}"
-
-@st.cache_data(show_spinner=False, ttl=300)
-def google_matrix_minutes(
-    points_tuple: tuple,  # tuple(points) to make it hashable for cache
-    departure_epoch: int,
-    api_key: str,
-    traffic_model: str = "best_guess",
-) -> pd.DataFrame:
-    """Return NxN minutes using Google Distance Matrix (duration_in_traffic)."""
-    points = list(points_tuple)
-    base = "https://maps.googleapis.com/maps/api/distancematrix/json"
-    n = len(points)
-    mins = [[0.0]*n for _ in range(n)]
-    batch = 10  # 10x10 => 100 elements
-
-    for oi in range(0, n, batch):
-        for di in range(0, n, batch):
-            origins = "|".join(_latlng_str(p) for p in points[oi:oi+batch])
-            dests   = "|".join(_latlng_str(p) for p in points[di:di+batch])
-            params = {
-                "origins": origins,
-                "destinations": dests,
-                "departure_time": departure_epoch,
-                "traffic_model": traffic_model,
-                "units": "metric",
-                "key": api_key,
-            }
-            r = requests.get(base, params=params, timeout=15)
-            r.raise_for_status()
-            js = r.json()
-            if js.get("status") != "OK":
-                raise RuntimeError(f"Google DM status={js.get('status')}")
-            rows = js["rows"]
-            for i, row in enumerate(rows):
-                for j, el in enumerate(row["elements"]):
-                    if el.get("status") != "OK":
-                        value = float("inf")
-                    else:
-                        sec = el.get("duration_in_traffic", el.get("duration", {})).get("value", 0)
-                        value = sec / 60.0
-                    mins[oi+i][di+j] = float(value)
-            time.sleep(0.05)  # be polite
-    return pd.DataFrame(mins)
-
-@st.cache_data(show_spinner=False, ttl=900)
-def weather_slowdown_factor(lat: float, lon: float, epoch: int) -> float:
-    """
-    Return a multiplicative factor based on rain/wind at the depot hour.
-    1.00 = no change, 1.10 = +10% time, capped at 1.35.
-    """
-    from datetime import datetime, timezone
-    dt_ = datetime.fromtimestamp(epoch, tz=timezone.utc)
-    date_str = dt_.strftime("%Y-%m-%d")
-    hour = dt_.hour
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={lat:.4f}&longitude={lon:.4f}"
-        "&hourly=precipitation,wind_speed_10m"
-        f"&start_date={date_str}&end_date={date_str}"
-        "&timezone=UTC"
-    )
+# ────────────────────────────────────────────────────────────────────────────────
+# (Optional) Live traffic travel-time matrix hook
+#   - Returns a pd.DataFrame(minutes) aligned with points indices, or None.
+#   - Keep as a stub for now; you can wire it to Google/HERE/Mapbox later.
+# ────────────────────────────────────────────────────────────────────────────────
+def _maybe_load_live_traffic(points: List[Tuple[float, float]], when: dt.datetime) -> Optional[pd.DataFrame]:
     try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        js = r.json()
-        hours = js["hourly"]["time"]
-        precip = js["hourly"]["precipitation"]
-        wind = js["hourly"]["wind_speed_10m"]
-        for t, p, w in zip(hours, precip, wind):
-            # '2025-10-14T09:00'
-            if int(t.split("T")[1].split(":")[0]) == hour:
-                factor = 1.0
-                if p >= 1.0: factor += 0.10
-                if p >= 5.0: factor += 0.10
-                if w >= 35:  factor += 0.05
-                return min(1.35, factor)
+        # Placeholder example (always returns None in this prototype)
+        # Integrate your external API here and return a DataFrame of minutes
+        # with shape (N, N), same ordering as `points`.
+        return None
     except Exception:
-        pass
-    return 1.0
+        return None
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Planner settings (sidebar)
@@ -210,19 +139,6 @@ with st.sidebar:
         if use_now else st.time_input("Pick time", dt.time(8, 0), step=dt.timedelta(minutes=5))
     )
 
-    # Live data toggles
-    st.subheader("Live data")
-    use_live_traffic = st.toggle("Use live traffic (Google)", value=False)
-    use_weather_penalty = st.toggle("Adjust for weather", value=False)
-    # Secrets preferred; allow manual input fallback
-    default_key = st.secrets.get("GOOGLE_MAPS_API_KEY", "")
-    api_key_input = st.text_input(
-        "Google Maps API key",
-        value="",
-        type="password",
-        help="Leave blank to use GOOGLE_MAPS_API_KEY from .streamlit/secrets.toml"
-    )
-
     st.subheader("Depot")
     use_manual_depot = st.checkbox("Use manual depot (place)", value=False)
     depot_coords = None
@@ -236,6 +152,9 @@ with st.sidebar:
         if depot_coords is None:
             st.info("Using centroid as depot (could not geocode).")
 
+    st.subheader("Live travel time (optional)")
+    use_live = st.toggle("Try live traffic-based ETAs", value=False)
+
 # Fallback depot = centroid
 if depot_coords is None:
     depot = (float(orders["lat"].mean()), float(orders["lon"].mean()))
@@ -243,34 +162,25 @@ else:
     depot = (float(depot_coords[0]), float(depot_coords[1]))
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Build points, travel-time matrix (minutes)
+# Points, distance, travel-time (M_min)
 # ────────────────────────────────────────────────────────────────────────────────
 points = [depot] + list(zip(orders["lat"].tolist(), orders["lon"].tolist()))
-shift_start_min = int(shift_time.hour) * 60 + int(shift_time.minute)
-departure_epoch = int(dt.datetime.combine(dt.date.today(), shift_time).timestamp())
-
-# Default: fallback minutes via haversine + speed
 D_km = distance_matrix(points)
+
+# Default (fallback): minutes = distance / speed
 v_km_min = max(float(speed_kph), 5.0) / 60.0
-M_min = (D_km / max(v_km_min, 1e-6))  # minutes
+# IMPORTANT: make this a DataFrame so .iloc works everywhere
+M_min = pd.DataFrame(D_km / max(v_km_min, 1e-6))
 traffic_used = False
 
-# Try live traffic minutes if toggled on
-if use_live_traffic:
-    try:
-        api_key = (api_key_input.strip() or default_key).strip()
-        if not api_key:
-            raise ValueError("Missing Google Maps API key.")
-        with st.spinner("Fetching live traffic matrix…"):
-            M_min = google_matrix_minutes(tuple(points), departure_epoch, api_key)
-        # Optional weather penalty (single factor by depot hour)
-        if use_weather_penalty and len(points) > 0:
-            wfac = weather_slowdown_factor(points[0][0], points[0][1], departure_epoch)
-            M_min = M_min * float(wfac)
-        st.info("Using live traffic durations (minutes).")
+# Try live traffic matrix (if toggled and available)
+if use_live:
+    live = _maybe_load_live_traffic(points, dt.datetime.combine(dt.date.today(), shift_time))
+    if isinstance(live, pd.DataFrame) and list(live.shape) == [len(points), len(points)]:
+        M_min = live.copy()
         traffic_used = True
-    except Exception as e:
-        st.warning(f"Traffic matrix failed, using fallback average-speed model. Details: {e}")
+
+shift_start_min = int(shift_time.hour) * 60 + int(shift_time.minute)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Capacity-aware sweep clustering (angle ordering) with stop cap
@@ -298,12 +208,11 @@ for n in nodes:
         cluster_loads[i] += dem
         i = (i + 1) % int(num_vehicles)
 
-# Any nodes still not assigned because of capacity/stop-cap?
 assigned_set = set([n for cl in clusters for n in cl])
 unassigned_nodes = [n for n in nodes if n not in assigned_set]
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Route construction: nearest neighbor → 2-opt, with duration check (uses M_min)
+# Route construction: nearest neighbor → 2-opt, with duration check
 # ────────────────────────────────────────────────────────────────────────────────
 def route_len_km(route: list[int]) -> float:
     return float(sum(D_km[route[i], route[i+1]] for i in range(len(route)-1)))
@@ -315,7 +224,8 @@ def nearest_neighbor_route(cluster: list[int]) -> list[int]:
     route = [0]
     cur = 0
     while un:
-        nxt = min(un, key=lambda j: D_km[cur, j])  # still use distance to order stops
+        # Nearest by *distance* for geometry
+        nxt = min(un, key=lambda j: D_km[cur, j])
         un.remove(nxt)
         route.append(nxt)
         cur = nxt
@@ -339,9 +249,8 @@ def two_opt(route: list[int]) -> list[int]:
 
 def simulate_route_time_minutes(route: list[int]) -> int:
     """
-    Returns total minutes from shift start until returning to depot,
-    including driving, waiting for windows, and service times.
-    Uses M_min for per-leg minutes.
+    Total minutes from shift start to return to depot,
+    using M_min travel times, waiting for window start, plus service.
     """
     tmin = shift_start_min
     for i in range(len(route) - 1):
@@ -371,16 +280,16 @@ for cl in clusters:
         routes_idx.append(base)
         continue
 
-    # Greedy trimming with best time gain
+    # Greedy trimming by best time gain
     route = base[:]
     removed = []
     while len(route) > 3 and simulate_route_time_minutes(route) > max_route_minutes:
         best_gain = -1
         best_pos = None
         for pos in range(1, len(route) - 1):
-            original = simulate_route_time_minutes(route)
+            old_t = simulate_route_time_minutes(route)
             trial = route[:pos] + route[pos+1:]
-            gain = original - simulate_route_time_minutes(trial)
+            gain = old_t - simulate_route_time_minutes(trial)
             if gain > best_gain:
                 best_gain, best_pos = gain, pos
         if best_pos is None:
@@ -417,17 +326,19 @@ for n in overflow_nodes + unassigned_nodes:
     if not placed:
         unassigned_nodes.append(n)
 
-# Deduplicate unassigned list
 unassigned_nodes = sorted(set(unassigned_nodes) - set([0]))
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Build route plan with ETAs (AM/PM) + window checks (use M_min)
+# Build route plan with ETAs (AM/PM) + window checks
 # ────────────────────────────────────────────────────────────────────────────────
 rows = []
 for v, route in enumerate(routes_idx, start=1):
     tmin = shift_start_min
     for i in range(len(route) - 1):
         a, b = route[i], route[i + 1]
+        # for display we still keep distance (km)
+        leg_km = float(D_km[a, b])
+        # ETA accumulation uses travel-time matrix
         drive_min = int(round(float(M_min.iloc[a, b])))
         tmin += drive_min
 
@@ -444,9 +355,6 @@ for v, route in enumerate(routes_idx, start=1):
             if tw_e is not None and tmin > tw_e:
                 within = False
 
-            # keep distance for reporting
-            leg_km = float(D_km[a, b])
-
             rows.append(dict(
                 vehicle_id=f"V{v}",
                 order_id=str(r["order_id"]),
@@ -458,7 +366,6 @@ for v, route in enumerate(routes_idx, start=1):
                 within_window=within,
                 leg_km=round(leg_km, 2),
                 demand=int(r["demand"]),
-                traffic_used=traffic_used,
             ))
             tmin += svc
 
@@ -491,13 +398,16 @@ st.session_state["settings"] = dict(
     shift_start=min_to_ampm(shift_start_min),
     depot_lat=depot[0],
     depot_lon=depot[1],
+    traffic_used=bool(traffic_used),
 )
-save_routes(df_plan)  # ← persist the plan
+save_routes(df_plan)
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Results (AM/PM)
 # ────────────────────────────────────────────────────────────────────────────────
-st.success(f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stop(s).")
+msg = f"Planned {df_plan['vehicle_id'].nunique()} route(s) for {len(df_plan)} stop(s)."
+msg += " (Live traffic)" if traffic_used else ""
+st.success(msg)
 st.markdown("### Planned routes")
 
 df_show = df_plan.copy()
