@@ -17,7 +17,7 @@ import pydeck as pdk
 # ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Upload Orders", layout="wide")
 st.title(" Upload Orders")
-st.caption(f"Build: {BUILD}")
+
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Simple persistence helpers (CSV on local disk)
