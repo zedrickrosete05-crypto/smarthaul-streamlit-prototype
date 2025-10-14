@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 st.cache_data.clear()
 
-import io, re, time, json, urllib.parse, urllib.request
+import io, re, time, json, os, urllib.parse, urllib.request
 from typing import Any, Optional, Tuple
 
 import numpy as np
@@ -16,9 +16,41 @@ import pydeck as pdk
 # Page header
 # ────────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="SmartHaul – Upload Orders", layout="wide")
-BUILD = "uploader-am/pm-proof-v3"
+BUILD = "uploader-am/pm-proof-v4 (with persistence)"
 st.title("📦 Upload Orders")
 st.caption(f"Build: {BUILD}")
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Simple persistence helpers (CSV on local disk)
+# ────────────────────────────────────────────────────────────────────────────────
+DATA_DIR = "data"
+ORDERS_PATH = os.path.join(DATA_DIR, "orders_df.csv")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def save_orders(df: pd.DataFrame) -> None:
+    try:
+        df.to_csv(ORDERS_PATH, index=False)
+    except Exception:
+        pass
+
+def load_orders() -> Optional[pd.DataFrame]:
+    try:
+        if os.path.exists(ORDERS_PATH):
+            return pd.read_csv(ORDERS_PATH)
+    except Exception:
+        return None
+    return None
+
+with st.sidebar:
+    st.subheader("Session")
+    if st.button("Load last session"):
+        prev = load_orders()
+        if prev is not None and not prev.empty:
+            st.session_state["orders_df"] = prev.copy()
+            st.success(f"Restored {len(prev)} orders from last session.")
+            st.stop()  # stop here so other pages see restored data immediately
+        else:
+            st.info("No previous orders found.")
 
 # ────────────────────────────────────────────────────────────────────────────────
 # Columns
@@ -150,6 +182,7 @@ def template_bytes() -> bytes:
         "tw_start": ["08:30 AM", "09:00 AM", "10:00 AM", "11:30 AM", "01:00 PM"],
         "tw_end":   ["11:00 AM", "12:00 PM", "01:00 PM", "02:30 PM", "04:00 PM"],
         "service_min": [7, 5, 10, 6, 8],
+        "demand": [1, 2, 1, 3, 1],
     })
     buf = io.StringIO(); demo.to_csv(buf, index=False)
     return buf.getvalue().encode("utf-8")
@@ -182,7 +215,10 @@ st.subheader("Preview (raw upload)")
 st.dataframe(df.head(50), use_container_width=True)
 
 # normalize headers (aliases)
-ren = {c: ALIASES.get(c.strip().lower(), c) for c in df.columns}
+ren = {}
+for c in df.columns:
+    key = c.strip().lower()
+    ren[c] = ALIASES.get(key, c)
 df = df.rename(columns=ren)
 
 # Ensure columns exist
@@ -195,6 +231,9 @@ for c in ["order_id", "place", "tw_start", "tw_end", "hub", "notes"]:
     df[c] = df[c].astype("string").str.strip()
 for c in ["lat", "lon", "service_min", "demand", "priority"]:
     df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# Default demand = 1
+df["demand"] = df["demand"].fillna(1).clip(lower=0).astype(int)
 
 # Drop duplicate order_ids (keep first, show info)
 dups = df["order_id"].duplicated(keep="first")
@@ -220,6 +259,14 @@ if bad_mask.any():
     st.dataframe(df.loc[bad_mask, ["order_id", "tw_start", "tw_end"]], use_container_width=True)
     st.stop()
 
+# Same-day window sanity (simple rule; adjust if you need overnight windows)
+bad_window = (df["tw_start_min"].notna() & df["tw_end_min"].notna()
+              & (df["tw_end_min"] < df["tw_start_min"]))
+if bad_window.any():
+    st.error("Some rows have tw_end earlier than tw_start (same-day windows). Please fix:")
+    st.dataframe(df.loc[bad_window, ["order_id", "tw_start", "tw_end"]], use_container_width=True)
+    st.stop()
+
 # Service time (minutes)
 df["service_time_min"] = pd.to_numeric(df["service_min"], errors="coerce").fillna(0).clip(lower=0).astype(int)
 
@@ -231,12 +278,18 @@ if need_geo.any():
     st.info("Geocoding rows with missing coordinates from 'place'…")
     geocode_missing(df, suffix=" Philippines", delay_s=1.0)
 
-# Canonical order + persist
+# Warn if still missing coordinates after geocoding
+still_missing = df["lat"].isna() | df["lon"].isna()
+if still_missing.any():
+    st.warning(f"{int(still_missing.sum())} row(s) still lack coordinates after geocoding.")
+
+# Canonical order + persist to session and disk
 for c in CANONICAL:
     if c not in df.columns:
         df[c] = pd.NA
 df = df[CANONICAL].copy()
 st.session_state["orders_df"] = df.copy()
+save_orders(df)  # <-- persistence
 
 # Summary + preview
 ok_rows = int((~(df["lat"].isna() | df["lon"].isna())).sum())
