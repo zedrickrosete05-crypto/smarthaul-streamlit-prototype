@@ -1,22 +1,46 @@
 # pages/4_KPIs_and_Reports.py
 from __future__ import annotations
 
-import math
+import os, math
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="SmartHaul – KPIs & Reports", layout="wide")
-BUILD = "kpis-v3"
+BUILD = "kpis-v4 (auto-load + safe columns)"
 st.title("KPIs & Reports")
 st.caption(f"Build: {BUILD}")
 
+# ───────────────── persistence: auto-load last plan if missing ─────────────────
+DATA_DIR = "data"
+ROUTES_PATH = os.path.join(DATA_DIR, "routes_df.csv")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+if "routes_df" not in st.session_state or st.session_state["routes_df"] is None:
+    if os.path.exists(ROUTES_PATH):
+        try:
+            st.session_state["routes_df"] = pd.read_csv(ROUTES_PATH)
+            st.toast("Loaded last saved plan from disk.", icon="✅")
+        except Exception:
+            pass
+
 # ───────────────── guards ─────────────────
+def safe_page_link(page: str, label: str) -> None:
+    try:
+        st.page_link(page, label=label)
+    except TypeError:
+        st.markdown(f"[{label}]({page})")
+
 if "routes_df" not in st.session_state or st.session_state["routes_df"] is None:
     st.warning("No plan available. Go to **Optimize Routes** first.")
-    st.page_link("pages/2_Optimize_Routes.py", label="← Optimize Routes", icon="⬅️")
+    safe_page_link("pages/2_Optimize_Routes.py", "← Optimize Routes")
     st.stop()
 
 df = st.session_state["routes_df"].copy()
+
+# ensure expected columns exist (prevents KeyErrors if older plans)
+for c in ["vehicle_id","order_id","eta","tw_start","tw_end","status","alert","leg_km","lat","lon","within_window"]:
+    if c not in df.columns:
+        df[c] = pd.NA
 
 # Default settings (if optimizer didn't store them)
 settings = st.session_state.get("settings", {})
@@ -41,13 +65,13 @@ with st.sidebar:
     st.header("Filters")
     vehicles = sorted(df["vehicle_id"].astype(str).unique().tolist())
     veh_sel = st.multiselect("Vehicle(s)", vehicles, default=vehicles)
-    status_vals = sorted(df["status"].astype(str).unique().tolist())
+    status_vals = sorted(df["status"].astype(str).fillna("Planned").unique().tolist())
     status_sel = st.multiselect("Status", status_vals, default=status_vals)
     show_only_late = st.checkbox("Show only late/at-risk", value=False)
 
 f = df.copy()
 f["vehicle_id"] = f["vehicle_id"].astype(str)
-f["status"] = f["status"].astype(str)
+f["status"] = f["status"].astype(str).fillna("Planned")
 f = f[f["vehicle_id"].isin(veh_sel) & f["status"].isin(status_sel)]
 if show_only_late:
     f = f[(f["within_window"] == False) | (f["alert"].fillna("") != "")]
